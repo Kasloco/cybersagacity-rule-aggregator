@@ -124,7 +124,7 @@ Or set up a cron job:
 
 ## Project Structure
 
-```
+```text
 cybersagacity-rule-aggregator/
 ├── app.py                  # Flask web dashboard
 ├── cli.py                  # Command-line interface
