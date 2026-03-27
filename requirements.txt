@@ -1,0 +1,10 @@
+flask==3.1.0
+flask-cors==5.0.1
+requests==2.32.3
+gitpython==3.1.44
+pyyaml==6.0.2
+apscheduler==3.11.0
+rich==13.9.4
+click==8.1.8
+python-dateutil==2.9.0
+gunicorn==23.0.0
