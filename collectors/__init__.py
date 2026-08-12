@@ -22,6 +22,8 @@ from .php_codesniffer import PHPCodeSnifferCollector
 from .deque_axe import DequeAXECollector
 from .gitlab_sast import GitLabSASTCollector
 from .snyk import SnykCollector
+from .clang import ClangCollector
+from .veracode import VeracodeCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -42,4 +44,6 @@ ALL_COLLECTORS = [
     DequeAXECollector,
     GitLabSASTCollector,
     SnykCollector,
+    ClangCollector,
+    VeracodeCollector,
 ]
