@@ -24,6 +24,20 @@ from .gitlab_sast import GitLabSASTCollector
 from .snyk import SnykCollector
 from .clang import ClangCollector
 from .veracode import VeracodeCollector
+from .brakeman import BrakemanCollector
+from .gosec import GoSecCollector
+from .shellcheck import ShellCheckCollector
+from .checkov import CheckovCollector
+from .detekt import DetektCollector
+from .swiftlint import SwiftLintCollector
+from .pylint import PylintCollector
+from .infer import InferCollector
+from .hadolint import HadolintCollector
+from .phpstan import PHPStanCollector
+from .tfsec import TfsecCollector
+from .psalm import PsalmCollector
+from .dependency_check import DependencyCheckCollector
+from .retirejs import RetireJsCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -46,4 +60,18 @@ ALL_COLLECTORS = [
     SnykCollector,
     ClangCollector,
     VeracodeCollector,
+    BrakemanCollector,
+    GoSecCollector,
+    ShellCheckCollector,
+    CheckovCollector,
+    DetektCollector,
+    SwiftLintCollector,
+    PylintCollector,
+    InferCollector,
+    HadolintCollector,
+    PHPStanCollector,
+    TfsecCollector,
+    PsalmCollector,
+    DependencyCheckCollector,
+    RetireJsCollector,
 ]

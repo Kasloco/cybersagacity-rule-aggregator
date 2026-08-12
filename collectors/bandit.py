@@ -53,7 +53,10 @@ class BanditCollector(BaseCollector):
                     source_file=rel_path,
                     rule_content=content[:50000],
                     rule_format="python",
-                    metadata={"test_id": rule["id"]},
+                    metadata={
+                        "test_id": rule["id"],
+                        "native_severity": rule.get("native_severity", ""),
+                    },
                 )
                 count += 1
 
@@ -94,14 +97,31 @@ class BanditCollector(BaseCollector):
                 continue
             seen.add(tid)
 
-            # Determine severity from test ID range
-            num = int(tid[1:]) if tid[1:].isdigit() else 0
-            if num >= 600:
-                severity = "high"
-            elif num >= 300:
-                severity = "medium"
-            else:
-                severity = "low"
+            # Parse native severity from BanditMeta or checks.register call
+            # Bandit tags each test with HIGH/MEDIUM/LOW in the register decorator
+            native_severity = "MEDIUM"  # default
+            sev_match = re.search(
+                r"checks\.register\s*\([^)]*" + re.escape(tid) + r"['\"]\s*,\s*"
+                r"(?:severity\s*=\s*)?['\"]?(HIGH|MEDIUM|LOW)", content, re.IGNORECASE
+            )
+            if not sev_match:
+                # Try BanditMeta pattern: severity="HIGH"
+                sev_match = re.search(
+                    r"severity\s*=\s*['\"]?(HIGH|MEDIUM|LOW)", content, re.IGNORECASE
+                )
+            if sev_match:
+                native_severity = sev_match.group(1).upper()
+
+            severity_map = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
+            severity = severity_map.get(native_severity, "medium")
+
+            # Parse CWE from checks.register or BanditMeta
+            cwe_ids = []
+            cwe_match = re.search(r"cwe\s*=\s*['\"]?(CWE-?\d+)", content, re.IGNORECASE)
+            if cwe_match:
+                cwe_num = re.search(r"\d+", cwe_match.group(1))
+                if cwe_num:
+                    cwe_ids = [f"CWE-{cwe_num.group()}"]
 
             title = f"Bandit {tid}: {filename.replace('.py', '').replace('_', ' ').title()}"
             description = module_doc[:1000] if module_doc else f"Bandit security check {tid}"
@@ -111,7 +131,8 @@ class BanditCollector(BaseCollector):
                 "title": title,
                 "description": description,
                 "severity": severity,
-                "cwe_ids": [],
+                "cwe_ids": cwe_ids,
+                "native_severity": native_severity,
             })
 
         # If no test IDs found but file has content, create a single rule
