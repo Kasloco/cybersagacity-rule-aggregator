@@ -23,9 +23,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run full sync
+        env:
+          COLLECTOR_TIMEOUT: 300  # 5 min per collector max
         run: |
           python cli.py sync --force 2>&1 | tee sync_output.log
           python cli.py status | tee -a sync_output.log
+          # Exit 0 even if some collectors failed — partial sync is better than none
+          # Failed collectors are logged in the output above
 
       - name: Compact database for Vercel
         run: |
