@@ -97,17 +97,16 @@ class BanditCollector(BaseCollector):
                 continue
             seen.add(tid)
 
-            # Parse native severity from BanditMeta or checks.register call
-            # Bandit tags each test with HIGH/MEDIUM/LOW in the register decorator
+            # Parse native severity from bandit.Issue(severity=bandit.HIGH/MEDIUM/LOW)
+            # Bandit plugins declare severity in the return statement, not in decorators
             native_severity = "MEDIUM"  # default
             sev_match = re.search(
-                r"checks\.register\s*\([^)]*" + re.escape(tid) + r"['\"]\s*,\s*"
-                r"(?:severity\s*=\s*)?['\"]?(HIGH|MEDIUM|LOW)", content, re.IGNORECASE
+                r"severity\s*=\s*bandit\.(HIGH|MEDIUM|LOW)", content
             )
             if not sev_match:
-                # Try BanditMeta pattern: severity="HIGH"
+                # Fallback: bare bandit.HIGH/MEDIUM/LOW without severity= prefix
                 sev_match = re.search(
-                    r"severity\s*=\s*['\"]?(HIGH|MEDIUM|LOW)", content, re.IGNORECASE
+                    r"bandit\.(HIGH|MEDIUM|LOW)", content
                 )
             if sev_match:
                 native_severity = sev_match.group(1).upper()
