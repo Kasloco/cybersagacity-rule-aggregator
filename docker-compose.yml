@@ -6,8 +6,22 @@ services:
     environment:
       RULE_AGGREGATOR_DB: /data/rules.db
       RULE_AGGREGATOR_CLONE_DIR: /data/clones
+      SYNC_SCHEDULE: weekly
     volumes:
       - rules-data:/data
+    command: sh -c "python cli.py sync && python scheduler.py & python app.py"
+
+  # Optional: run the scheduler as a separate service
+  scheduler:
+    build: .
+    environment:
+      RULE_AGGREGATOR_DB: /data/rules.db
+      RULE_AGGREGATOR_CLONE_DIR: /data/clones
+      SYNC_SCHEDULE: weekly
+    volumes:
+      - rules-data:/data
+    command: python scheduler.py
+    restart: unless-stopped
 
 volumes:
   rules-data:

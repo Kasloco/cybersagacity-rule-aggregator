@@ -5,6 +5,7 @@ Can be run as a standalone daemon or invoked via cron.
 """
 
 import logging
+import os
 import signal
 import sys
 from datetime import datetime
@@ -57,17 +58,45 @@ def run_full_sync():
 
 
 def start_scheduler():
-    """Start the APScheduler daemon for monthly syncs."""
+    """Start the APScheduler daemon for periodic syncs.
+
+    Sync frequency can be configured via the SYNC_INTERVAL_HOURS env var
+    (default: 168 = weekly). Monthly is also supported via SYNC_SCHEDULE=monthly.
+    """
     scheduler = BlockingScheduler()
 
-    # Monthly sync on the 1st at 3:00 AM UTC
-    scheduler.add_job(
-        run_full_sync,
-        CronTrigger(day=1, hour=3, minute=0),
-        id="monthly_sync",
-        name="Monthly Rule Sync",
-        misfire_grace_time=86400,  # Allow 24h grace period
-    )
+    schedule_mode = os.environ.get("SYNC_SCHEDULE", "weekly")
+
+    if schedule_mode == "monthly":
+        # Monthly sync on the 1st at 3:00 AM UTC
+        scheduler.add_job(
+            run_full_sync,
+            CronTrigger(day=1, hour=3, minute=0),
+            id="monthly_sync",
+            name="Monthly Rule Sync",
+            misfire_grace_time=86400,
+        )
+        logger.info("Monthly sync scheduled for 1st of each month at 03:00 UTC.")
+    elif schedule_mode == "daily":
+        # Daily sync at 3:00 AM UTC
+        scheduler.add_job(
+            run_full_sync,
+            CronTrigger(hour=3, minute=0),
+            id="daily_sync",
+            name="Daily Rule Sync",
+            misfire_grace_time=3600,
+        )
+        logger.info("Daily sync scheduled at 03:00 UTC.")
+    else:
+        # Weekly sync on Sundays at 3:00 AM UTC (default)
+        scheduler.add_job(
+            run_full_sync,
+            CronTrigger(day_of_week="sun", hour=3, minute=0),
+            id="weekly_sync",
+            name="Weekly Rule Sync",
+            misfire_grace_time=86400,
+        )
+        logger.info("Weekly sync scheduled for Sundays at 03:00 UTC.")
 
     # Also run immediately on startup
     scheduler.add_job(

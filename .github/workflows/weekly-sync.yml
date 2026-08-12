@@ -1,0 +1,77 @@
+name: Weekly Rule Sync & Vercel Deploy
+
+on:
+  schedule:
+    # Every Sunday at 3:00 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout aggregator repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full sync
+        run: |
+          python cli.py sync --force 2>&1 | tee sync_output.log
+          python cli.py status | tee -a sync_output.log
+
+      - name: Compact database for Vercel
+        run: |
+          python3 -c "
+          import sqlite3
+          db = 'rules.db'
+          conn = sqlite3.connect(db)
+          # Truncate large fields for deploy (keep enough for dashboard + detail)
+          conn.execute('UPDATE rules SET rule_content = SUBSTR(rule_content, 1, 500) WHERE LENGTH(rule_content) > 500')
+          conn.execute('UPDATE rules SET metadata = SUBSTR(metadata, 1, 500) WHERE LENGTH(metadata) > 500')
+          conn.execute('UPDATE rules SET description = SUBSTR(description, 1, 1000) WHERE LENGTH(description) > 1000')
+          # Clear sync history and change log (not needed in deploy)
+          conn.execute('DELETE FROM rule_changes')
+          conn.execute('DELETE FROM sync_history')
+          conn.commit()
+          conn.execute('VACUUM')
+          conn.commit()
+          conn.close()
+          print('Database compacted for Vercel deploy')
+          "
+
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+        with:
+          repository: Kasloco/cybersagacity-deploy
+          token: ${{ secrets.DEPLOY_REPO_TOKEN }}
+          path: deploy-repo
+
+      - name: Copy database to deploy repo
+        run: |
+          cp rules.db deploy-repo/data/rules.db
+          cd deploy-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/rules.db
+          # Only commit if there are changes
+          git diff --staged --quiet && echo "No changes to deploy" && exit 0
+          git commit -m "Auto-sync: $(date -u '+%Y-%m-%d %H:%M UTC') rule database update
+
+          Synced from cybersagacity-rule-aggregator via GitHub Actions.
+          $(cat ../sync_output.log | grep -E '(✓|✗|Summary|Total)' | head -25)"
+          git push
+
+      - name: Create sync summary
+        if: always()
+        run: |
+          echo "## Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          cat sync_output.log | grep -E '(✓|✗|Total|Vendors)' >> $GITHUB_STEP_SUMMARY || echo "See logs for details" >> $GITHUB_STEP_SUMMARY
