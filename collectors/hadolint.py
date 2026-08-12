@@ -50,10 +50,10 @@ class HadolintCollector(BaseCollector):
         for fname in os.listdir(rules_dir):
             if not fname.endswith(".hs"):
                 continue
-            # Skip Shellcheck.hs — it wraps shellcheck rules, not DL rules
-            if fname.lower() == "shellcheck.hs":
-                continue
-            if not fname.startswith("DL"):
+            # Include both DL#### (Dockerfile) and SC#### (shellcheck-inline) rules.
+            # Hadolint embeds shellcheck for inline RUN bash — these are first-class
+            # part of Hadolint's output, not a separate vendor.
+            if not (fname.startswith("DL") or fname.startswith("SC")):
                 continue
 
             fpath = os.path.join(rules_dir, fname)
@@ -71,8 +71,8 @@ class HadolintCollector(BaseCollector):
             return 0
 
         # Extract code, severity, and message
-        code_match = re.search(r'code\s*=\s*"(DL\d+)"', content)
-        sev_match = re.search(r'severity\s*=\s*(DL\w+C)', content)
+        code_match = re.search(r'code\s*=\s*"(DL\d+|SC\d+)"', content)
+        sev_match = re.search(r'severity\s*=\s*(DL\w+C|DLInfoC|DLErrorC|DLWarningC|DLStyleC|DLIgnoreC|InfoC|WarningC|ErrorC|StyleC)', content)
         msg_match = re.search(
             r'message\s*=\s*"((?:[^"\\]|\\.)*)"', content
         )
