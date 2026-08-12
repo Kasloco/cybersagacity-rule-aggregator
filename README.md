@@ -33,6 +33,8 @@ Security teams deal with dozens of scanning tools, each with their own rule form
 | **Bandit** | 42 | [github.com/PyCQA/bandit](https://github.com/PyCQA/bandit) | Git clone + Python AST parsing |
 | **ESLint Security** | 14 | [github.com/eslint-community/eslint-plugin-security](https://github.com/eslint-community/eslint-plugin-security) | Git clone + JS parsing |
 
+> Counts are from a prior sync and may differ from current vendor sources — run `python cli.py sync` then `python cli.py status` for live numbers. (Trivy's earlier "905" was inflated by `_test.rego` fixtures being indexed as rules; real checks number 563.)
+
 ## SonarQube Format (Chris's Specification)
 
 SonarQube rules follow Chris Near's exact format specification:
@@ -102,10 +104,21 @@ The dashboard exposes a full REST API:
 |----------|-------------|
 | `GET /api/stats` | Dashboard statistics (totals, distributions) |
 | `GET /api/rules?q=injection&vendor=semgrep&severity=high&category=security&language=python&page=1&per_page=50` | Search rules with filters |
-| `GET /api/rules/<rule_id>` | Get a specific rule's full details |
+| `GET /api/rules/<vendor>/<rule_id>` | Get a specific rule's full details (vendor-scoped — rule IDs can collide across vendors) |
 | `GET /api/vendors` | List all vendors with rule counts |
 | `GET /api/languages` | Language distribution |
 | `GET /api/categories` | Category distribution |
+
+Search responses are **summary rows** (no `rule_content`) to keep payloads small; call the detail endpoint for a rule's full definition. Invalid `page`/`per_page` values return `400` (valid ranges: `page >= 1`, `1 <= per_page <= 200`). Queries that FTS5 rejects (e.g. a lone quote) fall back to a substring search instead of erroring.
+
+### Docker Deployment
+
+```bash
+docker compose up --build
+# Open http://localhost:8080
+```
+
+On first start the container runs a full sync (all ~30k rules) before serving. The rules database and vendor git clones are stored on a persistent Docker volume (`rules-data` → `/data`), so restarts reuse them and skip the heavy work. Set `RULE_AGGREGATOR_SYNC_ON_START=0` to disable the startup sync.
 
 ## Automated Monthly Sync
 

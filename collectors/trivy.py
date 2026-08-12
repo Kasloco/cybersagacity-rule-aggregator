@@ -28,6 +28,10 @@ class TrivyCollector(BaseCollector):
             for fname in files:
                 if not fname.endswith(".rego"):
                     continue
+                if fname.endswith("_test.rego"):
+                    # Test fixtures declare the same package as the real check,
+                    # which would collide on rule_id and flip-flop content.
+                    continue
 
                 fpath = os.path.join(root, fname)
                 rel_path = os.path.relpath(fpath, self.clone_dir)

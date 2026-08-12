@@ -9,9 +9,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN python database.py
+# Rule clones and the rules database live under /data (a persistent volume in
+# docker-compose.yml) so restarts reuse them instead of re-cloning/re-syncing.
+ENV RULE_AGGREGATOR_CLONE_DIR=/data/clones
 
 EXPOSE 8080
 
-# Default: run the web dashboard
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "app:app"]
+# Syncs all vendors on first start (docker-entrypoint.sh), then serves the
+# dashboard. init_db() also runs at request time, so no schema step is needed.
+CMD ["sh", "docker-entrypoint.sh"]

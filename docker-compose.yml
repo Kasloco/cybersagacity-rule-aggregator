@@ -1,0 +1,13 @@
+services:
+  rules-aggregator:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      RULE_AGGREGATOR_DB: /data/rules.db
+      RULE_AGGREGATOR_CLONE_DIR: /data/clones
+    volumes:
+      - rules-data:/data
+
+volumes:
+  rules-data:

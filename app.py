@@ -4,10 +4,12 @@ Flask application serving the rule intelligence dashboard.
 """
 
 import json
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, abort
 from flask_cors import CORS
 
-from database import init_db, get_dashboard_stats, search_rules, get_db
+from database import (
+    init_db, get_dashboard_stats, search_rules, get_db, MAX_PER_PAGE,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -26,6 +28,24 @@ def ensure_db():
     init_db()
 
 
+def _parse_pagination():
+    """Parse and validate page/per_page query params, returning 400 on bad input."""
+    page = request.args.get("page", "1")
+    per_page = request.args.get("per_page", "50")
+    try:
+        page = int(page)
+        per_page = int(per_page)
+    except ValueError:
+        abort(400, description="page and per_page must be integers")
+    if page < 1:
+        abort(400, description="page must be >= 1")
+    if per_page < 1:
+        abort(400, description="per_page must be >= 1")
+    if per_page > MAX_PER_PAGE:
+        abort(400, description=f"per_page must be <= {MAX_PER_PAGE}")
+    return page, per_page
+
+
 @app.route("/")
 def dashboard():
     stats = get_dashboard_stats()
@@ -40,26 +60,27 @@ def api_stats():
 
 @app.route("/api/rules")
 def api_rules():
+    page, per_page = _parse_pagination()
     results = search_rules(
         query=request.args.get("q", ""),
         vendor=request.args.get("vendor"),
         severity=request.args.get("severity"),
         language=request.args.get("language"),
         category=request.args.get("category"),
-        page=int(request.args.get("page", 1)),
-        per_page=int(request.args.get("per_page", 50)),
+        page=page,
+        per_page=per_page,
     )
     return jsonify(results)
 
 
-@app.route("/api/rules/<rule_id>")
-def api_rule_detail(rule_id):
+@app.route("/api/rules/<vendor>/<rule_id>")
+def api_rule_detail(vendor, rule_id):
     with get_db() as conn:
         row = conn.execute("""
             SELECT r.*, v.name as vendor_name, v.display_name as vendor_display_name
             FROM rules r JOIN vendors v ON r.vendor_id=v.id
-            WHERE r.rule_id=?
-        """, (rule_id,)).fetchone()
+            WHERE v.name=? AND r.rule_id=?
+        """, (vendor, rule_id)).fetchone()
     if not row:
         return jsonify({"error": "Rule not found"}), 404
     return jsonify(dict(row))

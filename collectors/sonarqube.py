@@ -56,6 +56,17 @@ LANGUAGE_SOURCES = {
         "rspec_path": "analyzers/rspec/vbnet",
         "display": "VB.NET",
     },
+    "vb6": {
+        # VB6 rules are in the RSPEC fork under the vb6 language directory.
+        # The sonar-vb6 repository (SonarSource/sonar-vb6) is private/archived,
+        # but the RSPEC fork (dancer1325/sonar-rspec) has vb6 rule metadata.
+        # We also try the sonar-dotnet repo's rspec/vb6 path as a fallback.
+        "repo": "https://github.com/dancer1325/sonar-rspec.git",
+        "rspec_path": "rules/vb6",
+        "display": "VB6",
+        # VB6 rules in the RSPEC fork are structured as S####/metadata.json
+        "is_rspec_fork_language": True,
+    },
     "python": {
         "repo": "https://github.com/SonarSource/sonar-python.git",
         "rspec_path": "python-checks/src/main/resources/org/sonar/l10n/py/rules/python",
@@ -253,6 +264,11 @@ class SonarQubeCollector(BaseCollector):
             # Try alternate paths
             logger.debug(f"[sonarqube] Path not found: {rspec_path}")
             return 0
+
+        # RSPEC fork language directories use S####/metadata.json structure
+        # (directories containing metadata.json), while analyzer repos use
+        # flat S####.json files or S####/metadata.json directories.
+        is_rspec_lang = config.get("is_rspec_fork_language", False)
 
         for fname in os.listdir(rspec_path):
             fpath = os.path.join(rspec_path, fname)

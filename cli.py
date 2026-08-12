@@ -216,15 +216,23 @@ def vendors():
 
 @cli.command()
 @click.argument("rule_id")
-def show(rule_id):
+@click.option("--vendor", "-V", help="Disambiguate when the rule ID exists in multiple vendors")
+def show(rule_id, vendor):
     """Show detailed info about a specific rule."""
     init_db()
     with get_db() as conn:
-        row = conn.execute("""
-            SELECT r.*, v.display_name as vendor_name
-            FROM rules r JOIN vendors v ON r.vendor_id=v.id
-            WHERE r.rule_id=? LIMIT 1
-        """, (rule_id,)).fetchone()
+        if vendor:
+            row = conn.execute("""
+                SELECT r.*, v.display_name as vendor_name
+                FROM rules r JOIN vendors v ON r.vendor_id=v.id
+                WHERE v.name=? AND r.rule_id=? LIMIT 1
+            """, (vendor, rule_id)).fetchone()
+        else:
+            row = conn.execute("""
+                SELECT r.*, v.display_name as vendor_name
+                FROM rules r JOIN vendors v ON r.vendor_id=v.id
+                WHERE r.rule_id=? LIMIT 1
+            """, (rule_id,)).fetchone()
 
     if not row:
         console.print(f"[red]Rule not found: {rule_id}[/red]")

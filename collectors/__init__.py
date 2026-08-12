@@ -14,6 +14,14 @@ from .findsecbugs import FindSecBugsCollector
 from .pmd import PMDCollector
 from .eslint_security import ESLintSecurityCollector
 from .sonarqube import SonarQubeCollector
+from .spotbugs import SpotBugsCollector
+from .cppcheck import CppCheckCollector
+from .flawfinder import FlawfinderCollector
+from .phpmd import PHPMDCollector
+from .php_codesniffer import PHPCodeSnifferCollector
+from .deque_axe import DequeAXECollector
+from .gitlab_sast import GitLabSASTCollector
+from .snyk import SnykCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -26,4 +34,12 @@ ALL_COLLECTORS = [
     PMDCollector,
     ESLintSecurityCollector,
     SonarQubeCollector,
+    SpotBugsCollector,
+    CppCheckCollector,
+    FlawfinderCollector,
+    PHPMDCollector,
+    PHPCodeSnifferCollector,
+    DequeAXECollector,
+    GitLabSASTCollector,
+    SnykCollector,
 ]

@@ -53,6 +53,8 @@ def run_full_sync():
     )
     logger.info("=" * 60)
 
+    return total
+
 
 def start_scheduler():
     """Start the APScheduler daemon for monthly syncs."""
@@ -92,6 +94,9 @@ def start_scheduler():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--once":
         init_db()
-        run_full_sync()
+        total = run_full_sync()
+        if total["errors"]:
+            logger.error("One or more collectors failed — exiting non-zero.")
+            sys.exit(1)
     else:
         start_scheduler()

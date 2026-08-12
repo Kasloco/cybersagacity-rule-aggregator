@@ -11,7 +11,7 @@ import git
 
 from database import (
     upsert_vendor, upsert_rule, start_sync, complete_sync,
-    update_vendor_stats, get_db,
+    update_vendor_stats, deactivate_missing_rules, get_db, transaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,9 @@ class BaseCollector(ABC):
         self.sync_id = None
         self.stats = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
         self.clone_dir = os.path.join(CLONE_BASE, self.name)
+        # Rule IDs upserted during the current collect; used to deactivate
+        # rules that the vendor source no longer contains.
+        self.seen_rule_ids = set()
 
     def register_vendor(self):
         self.vendor = upsert_vendor(
@@ -89,7 +92,10 @@ class BaseCollector(ABC):
                 )
 
     def upsert(self, rule_id, title, **kwargs):
-        status, db_id = upsert_rule(self.vendor["id"], rule_id, title, **kwargs)
+        self.seen_rule_ids.add(rule_id)
+        status, db_id = upsert_rule(
+            self.vendor["id"], rule_id, title, sync_id=self.sync_id, **kwargs
+        )
         self.stats[status] = self.stats.get(status, 0) + 1
         return status, db_id
 
@@ -107,7 +113,16 @@ class BaseCollector(ABC):
                     complete_sync(self.sync_id, "success", 0, 0, 0)
                     return self.stats
 
-            self.collect_rules()
+            # collect_rules + deactivation run in one transaction: tens of
+            # thousands of upserts commit once (fast), and a mid-sync failure
+            # rolls back atomically instead of leaving partial data.
+            with transaction():
+                self.collect_rules()
+                removed = deactivate_missing_rules(
+                    self.vendor["id"], self.seen_rule_ids, self.sync_id
+                )
+                self.stats["removed"] = removed
+
             self.save_commit_sha()
             update_vendor_stats(self.vendor["id"])
 

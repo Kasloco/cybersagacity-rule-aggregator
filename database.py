@@ -6,6 +6,7 @@ SQLite database for storing security rules from all major scanning tools.
 import sqlite3
 import os
 import json
+import threading
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -13,6 +14,10 @@ DB_PATH = os.environ.get(
     "RULE_AGGREGATOR_DB",
     os.path.join(os.path.dirname(__file__), "rules.db"),
 )
+
+# Holds the active transaction connection for the current thread, so nested
+# get_db()/upsert_* calls reuse one connection and commit once per sync.
+_tx = threading.local()
 
 
 def get_connection():
@@ -25,6 +30,12 @@ def get_connection():
 
 @contextmanager
 def get_db():
+    # Inside an outer transaction(): yield its connection without committing.
+    conn = getattr(_tx, "conn", None)
+    if conn is not None:
+        yield conn
+        return
+
     conn = get_connection()
     try:
         yield conn
@@ -33,6 +44,27 @@ def get_db():
         conn.rollback()
         raise
     finally:
+        conn.close()
+
+
+@contextmanager
+def transaction():
+    """Run a block in a single transaction on one connection.
+
+    All get_db()/upsert_* calls made inside commit once when the block exits
+    (or roll back atomically if it raises). Safe across threads (gunicorn
+    workers, scheduler).
+    """
+    conn = get_connection()
+    _tx.conn = conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _tx.conn = None
         conn.close()
 
 
@@ -154,34 +186,72 @@ def upsert_vendor(name, display_name, source_type, source_url, description="", l
         return conn.execute("SELECT * FROM vendors WHERE name=?", (name,)).fetchone()
 
 
+# Columns considered when deciding whether a rule "changed". rule_content alone
+# missed metadata-only edits (severity/title changes with identical content).
+_MUTABLE_FIELDS = (
+    "title", "description", "severity", "category", "language",
+    "cwe_ids", "owasp_ids", "tags", "source_file", "rule_content",
+    "rule_format", "metadata",
+)
+
+
+def _record_change(conn, rule_id, change_type, old_content, new_content, sync_id):
+    conn.execute(
+        "INSERT INTO rule_changes (rule_id, change_type, old_content, new_content, sync_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (rule_id, change_type, old_content, new_content, sync_id),
+    )
+
+
 def upsert_rule(vendor_id, rule_id, title, description="", severity="medium",
                 category="", language="", cwe_ids=None, owasp_ids=None,
                 tags=None, source_file="", rule_content="", rule_format="",
-                metadata=None):
-    cwe_json = json.dumps(cwe_ids or [])
-    owasp_json = json.dumps(owasp_ids or [])
-    tags_json = json.dumps(tags or [])
-    meta_json = json.dumps(metadata or {})
+                metadata=None, sync_id=None):
+    # sort_keys for stable comparisons across runs (dict ordering differs
+    # between metadata sources).
+    cwe_json = json.dumps(cwe_ids or [], sort_keys=True)
+    owasp_json = json.dumps(owasp_ids or [], sort_keys=True)
+    tags_json = json.dumps(tags or [], sort_keys=True)
+    meta_json = json.dumps(metadata or {}, sort_keys=True)
+
+    new_values = (title, description, severity, category, language,
+                  cwe_json, owasp_json, tags_json, source_file,
+                  rule_content, rule_format, meta_json)
 
     with get_db() as conn:
         existing = conn.execute(
-            "SELECT id, rule_content FROM rules WHERE vendor_id=? AND rule_id=?",
+            f"SELECT id, is_active, {', '.join(_MUTABLE_FIELDS)} FROM rules "
+            "WHERE vendor_id=? AND rule_id=?",
             (vendor_id, rule_id)
         ).fetchone()
 
         if existing:
-            if existing["rule_content"] != rule_content:
+            if tuple(existing[f] for f in _MUTABLE_FIELDS) != new_values:
                 conn.execute("""
                     UPDATE rules SET
                         title=?, description=?, severity=?, category=?, language=?,
                         cwe_ids=?, owasp_ids=?, tags=?, source_file=?,
                         rule_content=?, rule_format=?, metadata=?,
+                        is_active=1,
                         last_updated_at=CURRENT_TIMESTAMP
                     WHERE id=?
-                """, (title, description, severity, category, language,
-                      cwe_json, owasp_json, tags_json, source_file,
-                      rule_content, rule_format, meta_json, existing["id"]))
+                """, new_values + (existing["id"],))
+                _record_change(
+                    conn, existing["id"], "updated",
+                    existing["rule_content"], rule_content, sync_id,
+                )
                 return ("updated", existing["id"])
+            if not existing["is_active"]:
+                # Re-appeared with identical content after a removal: revive.
+                conn.execute(
+                    "UPDATE rules SET is_active=1, last_updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (existing["id"],),
+                )
+                _record_change(
+                    conn, existing["id"], "added",
+                    existing["rule_content"], rule_content, sync_id,
+                )
+                return ("added", existing["id"])
             return ("unchanged", existing["id"])
         else:
             cursor = conn.execute("""
@@ -192,7 +262,35 @@ def upsert_rule(vendor_id, rule_id, title, description="", severity="medium",
             """, (vendor_id, rule_id, title, description, severity, category,
                   language, cwe_json, owasp_json, tags_json, source_file,
                   rule_content, rule_format, meta_json))
+            _record_change(conn, cursor.lastrowid, "added", None, rule_content, sync_id)
             return ("added", cursor.lastrowid)
+
+
+def deactivate_missing_rules(vendor_id, seen_rule_ids, sync_id=None):
+    """Deactivate active rules for a vendor that were not seen in the last sync.
+
+    Records a 'removed' entry in rule_changes for each. Returns the count
+    removed. Rules stay in the table (is_active=0) to preserve history and the
+    rule_changes FK; all queries already filter on is_active=1.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, rule_id, rule_content FROM rules "
+            "WHERE vendor_id=? AND is_active=1",
+            (vendor_id,),
+        ).fetchall()
+
+        removed = 0
+        for row in rows:
+            if row["rule_id"] in seen_rule_ids:
+                continue
+            conn.execute(
+                "UPDATE rules SET is_active=0, last_updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (row["id"],),
+            )
+            _record_change(conn, row["id"], "removed", row["rule_content"], None, sync_id)
+            removed += 1
+        return removed
 
 
 def start_sync(vendor_id):
@@ -228,15 +326,45 @@ def update_vendor_stats(vendor_id):
         """, (count, vendor_id))
 
 
+# Summary columns for list/search responses. rule_content and metadata are
+# large and unnecessary for listings — the detail endpoint returns them.
+_RULE_SUMMARY_COLUMNS = (
+    "r.id", "r.vendor_id", "r.rule_id", "r.title", "r.description",
+    "r.severity", "r.category", "r.language", "r.cwe_ids", "r.owasp_ids",
+    "r.tags", "r.source_file", "r.rule_format", "r.first_seen_at",
+    "r.last_updated_at", "r.is_active",
+    "v.name as vendor_name", "v.display_name as vendor_display_name",
+)
+
+# Upper bound for per_page regardless of caller (CLI included).
+MAX_PER_PAGE = 200
+
+
 def search_rules(query="", vendor=None, severity=None, language=None,
                  category=None, page=1, per_page=50):
-    with get_db() as conn:
+    # Defensive clamps so no caller can produce a negative offset or a
+    # division-by-zero in the page math below.
+    page = max(1, int(page))
+    per_page = max(1, min(int(per_page), MAX_PER_PAGE))
+
+    def build(use_fts):
         conditions = ["r.is_active=1"]
         params = []
-
         if query:
-            conditions.append("r.id IN (SELECT rowid FROM rules_fts WHERE rules_fts MATCH ?)")
-            params.append(query)
+            if use_fts:
+                conditions.append(
+                    "r.id IN (SELECT rowid FROM rules_fts WHERE rules_fts MATCH ?)"
+                )
+                params.append(query)
+            else:
+                # Substring fallback for queries FTS5 rejects as malformed.
+                escaped = query.replace("%", "\\%").replace("_", "\\_")
+                like = f"%{escaped}%"
+                conditions.append(
+                    "(r.title LIKE ? ESCAPE '\\' OR r.description LIKE ? ESCAPE '\\' "
+                    "OR r.rule_id LIKE ? ESCAPE '\\')"
+                )
+                params.extend([like, like, like])
         if vendor:
             conditions.append("v.name=?")
             params.append(vendor)
@@ -249,23 +377,33 @@ def search_rules(query="", vendor=None, severity=None, language=None,
         if category:
             conditions.append("r.category=?")
             params.append(category)
+        return " AND ".join(conditions), params
 
-        where = " AND ".join(conditions)
+    def run(use_fts):
+        where, params = build(use_fts)
         offset = (page - 1) * per_page
-
         count = conn.execute(
-            f"SELECT COUNT(*) as c FROM rules r JOIN vendors v ON r.vendor_id=v.id WHERE {where}",
-            params
+            f"SELECT COUNT(*) as c FROM rules r JOIN vendors v ON r.vendor_id=v.id "
+            f"WHERE {where}",
+            params,
         ).fetchone()["c"]
-
         rows = conn.execute(f"""
-            SELECT r.*, v.name as vendor_name, v.display_name as vendor_display_name
+            SELECT {', '.join(_RULE_SUMMARY_COLUMNS)}
             FROM rules r
             JOIN vendors v ON r.vendor_id=v.id
             WHERE {where}
             ORDER BY r.last_updated_at DESC
             LIMIT ? OFFSET ?
         """, params + [per_page, offset]).fetchall()
+        return count, rows
+
+    with get_db() as conn:
+        try:
+            count, rows = run(use_fts=True)
+        except sqlite3.OperationalError:
+            # Malformed FTS query (e.g. a lone quote) — retry as a substring
+            # search so the API returns results instead of a 500.
+            count, rows = run(use_fts=False)
 
         return {
             "rules": [dict(r) for r in rows],
