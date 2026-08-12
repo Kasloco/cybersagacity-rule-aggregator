@@ -195,6 +195,20 @@ _MUTABLE_FIELDS = (
 )
 
 
+def _json_default(obj):
+    """Fallback for json.dumps — handles datetime and other non-serializable
+    objects that YAML parsers (PyYAML) produce from .snyk/.yaml rule files."""
+    if isinstance(obj, (datetime,)):
+        return obj.isoformat()
+    if isinstance(obj, set):
+        return list(obj)
+    return str(obj)
+
+
+def _json_dumps(obj, **kw):
+    return json.dumps(obj, default=_json_default, **kw)
+
+
 def _record_change(conn, rule_id, change_type, old_content, new_content, sync_id):
     conn.execute(
         "INSERT INTO rule_changes (rule_id, change_type, old_content, new_content, sync_id) "
@@ -209,10 +223,10 @@ def upsert_rule(vendor_id, rule_id, title, description="", severity="medium",
                 metadata=None, sync_id=None):
     # sort_keys for stable comparisons across runs (dict ordering differs
     # between metadata sources).
-    cwe_json = json.dumps(cwe_ids or [], sort_keys=True)
-    owasp_json = json.dumps(owasp_ids or [], sort_keys=True)
-    tags_json = json.dumps(tags or [], sort_keys=True)
-    meta_json = json.dumps(metadata or {}, sort_keys=True)
+    cwe_json = _json_dumps(cwe_ids or [], sort_keys=True)
+    owasp_json = _json_dumps(owasp_ids or [], sort_keys=True)
+    tags_json = _json_dumps(tags or [], sort_keys=True)
+    meta_json = _json_dumps(metadata or {}, sort_keys=True)
 
     new_values = (title, description, severity, category, language,
                   cwe_json, owasp_json, tags_json, source_file,
