@@ -55,6 +55,10 @@ from .mobsf import MobSFCollector
 from .owasp_zap import OWASPZapCollector
 from .errorprone import ErrorProneCollector
 from .fortify import FortifyCollector
+from .findbugs import FindBugsCollector
+from .checkmarx_cxsast import CheckmarxCxSASTCollector
+from .gitlab_advanced_sast import GitLabAdvancedSASTCollector
+from .mend_sast import MendCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -108,4 +112,8 @@ ALL_COLLECTORS = [
     OWASPZapCollector,
     ErrorProneCollector,
     FortifyCollector,
+    FindBugsCollector,
+    CheckmarxCxSASTCollector,
+    GitLabAdvancedSASTCollector,
+    MendCollector,
 ]
