@@ -9,16 +9,17 @@ from .base import BaseCollector
 logger = logging.getLogger(__name__)
 
 # CppCheck severity -> aggregator severity mapping
+# Chris Near uses Cppcheck's native severity names, not normalized ones
 SEVERITY_MAP = {
-    "error": "critical",
-    "warning": "high",
-    "performance": "medium",
-    "portability": "low",
-    "style": "low",
-    "information": "info",
-    "debug": "info",
-    "internal": "info",
-    "none": "info",
+    "error": "error",
+    "warning": "warning",
+    "style": "style",
+    "performance": "performance",
+    "portability": "portability",
+    "information": "information",
+    "debug": "debug",
+    "none": "none",
+    "unknown": "information",
 }
 
 # Files in lib/ that contain reportError/reportInfo calls
