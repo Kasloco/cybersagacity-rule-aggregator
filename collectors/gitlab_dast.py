@@ -2,18 +2,22 @@
 
 GitLab DAST is a dynamic application security testing tool that scans
 running web applications for vulnerabilities. The DAST analyzer is at
-github.com/gitlab-org/security-products/dast and uses a rules engine
-backed by the DAST scanner (ZAP-based). Rule definitions and scanner
-configurations are in YAML/JSON files.
+gitlab.com/gitlab-org/security-products/dast and is built on the OWASP ZAP
+scanner with GitLab-specific rule profiles and Browserker-based active checks.
 
-If the DAST repo is unavailable, this collector falls back to the main
-GitLab repo (github.com/gitlab-org/gitlab.git or gitlab.com) and looks
-in lib/gitlab/ci/dast/ for DAST-related configurations.
+Rule sources in the repo:
+  - src/config/exclude_rules.yml: ZAP rules that GitLab DAST excludes, each
+    with rule_id, name, and a link to zaproxy.org docs.
+  - src/config/browserker_active_checks.py: Browserker active check IDs with
+    the ZAP plugin IDs they replace.
+  - test/end-to-end/expect/*.json: Expected vulnerability reports with full
+    metadata (name, severity, CWE, description, identifiers).
 """
 
 import os
-import json
 import re
+import json
+import glob
 import logging
 
 try:
@@ -25,263 +29,310 @@ from .base import BaseCollector
 
 logger = logging.getLogger(__name__)
 
+_SEVERITY_MAP = {
+    "critical": "critical",
+    "high": "high",
+    "medium": "medium",
+    "moderate": "medium",
+    "low": "low",
+    "info": "info",
+    "informational": "info",
+}
+
 
 class GitLabDASTCollector(BaseCollector):
     name = "gitlab_dast"
     display_name = "GitLab DAST"
-    source_type = "github"
-    source_url = "https://github.com/gitlab-org/security-products/dast.git"
+    source_type = "gitlab"
+    source_url = "https://gitlab.com/gitlab-org/security-products/dast.git"
     description = (
         "GitLab DAST (Dynamic Application Security Testing) scans running "
         "web applications for security vulnerabilities including XSS, SQL "
         "injection, CSRF, header misconfigurations, and OWASP Top 10 issues. "
-        "Built on the OWASP ZAP scanner with GitLab-specific rule profiles."
+        "Built on the OWASP ZAP scanner with GitLab-specific rule profiles "
+        "and Browserker-based browser active checks."
     )
     logo_url = "https://avatars.githubusercontent.com/u/10669714"
 
     def collect_rules(self):
-        """Parse DAST analyzer config files and rule definitions."""
+        """Parse all DAST rule sources in the repo."""
         count = 0
 
-        # 1) Look for analyzer rules in the DAST repo structure
-        count += self._parse_rules_directories()
-        count += self._parse_config_files()
+        # 1) Parse exclude_rules.yml for ZAP rule IDs/names that DAST manages
+        count += self._parse_exclude_rules()
 
-        # 2) Look for scanner profiles (ZAP-based rules)
-        count += self._parse_scanner_profiles()
+        # 2) Parse browserker_active_checks.py for browser-based active checks
+        count += self._parse_browserker_checks()
+
+        # 3) Parse expected JSON test reports for vulnerability metadata
+        count += self._parse_expected_reports()
 
         logger.info(f"[gitlab_dast] Processed {count} rules")
 
-    def _parse_rules_directories(self):
-        """Walk the repo for rule definition files."""
-        count = 0
-        rule_dirs = [
-            os.path.join(self.clone_dir, "rules"),
-            os.path.join(self.clone_dir, "lib", "gitlab", "ci", "dast"),
-            os.path.join(self.clone_dir, "analyzer"),
-            os.path.join(self.clone_dir, "scan"),
-            os.path.join(self.clone_dir, "schemas"),
-        ]
+    # ------------------------------------------------------------------
+    # exclude_rules.yml — ZAP rules that GitLab DAST manages
+    # ------------------------------------------------------------------
 
-        for rdir in rule_dirs:
-            if not os.path.isdir(rdir):
-                continue
-            for root, dirs, files in os.walk(rdir):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for fname in sorted(files):
-                    if fname.endswith((".yml", ".yaml", ".json")):
-                        fpath = os.path.join(root, fname)
-                        rel_path = os.path.relpath(fpath, self.clone_dir)
-                        count += self._parse_rule_file(fpath, rel_path)
+    def _parse_exclude_rules(self):
+        """Parse src/config/exclude_rules.yml for ZAP rule IDs that GitLab
+        DAST explicitly excludes or manages."""
+        fpath = os.path.join(
+            self.clone_dir, "src", "config", "exclude_rules.yml"
+        )
+        if not os.path.isfile(fpath):
+            return 0
 
-        return count
-
-    def _parse_config_files(self):
-        """Parse top-level config files for DAST scanner configuration."""
-        count = 0
-        config_files = [
-            "config.yml",
-            "config.yaml",
-            "rules.yml",
-            "rules.yaml",
-            "analyzer.yml",
-            "dast.yml",
-            "dast-config.yml",
-        ]
-
-        for cf in config_files:
-            fpath = os.path.join(self.clone_dir, cf)
-            if os.path.isfile(fpath):
-                rel_path = os.path.relpath(fpath, self.clone_dir)
-                count += self._parse_rule_file(fpath, rel_path)
-
-        return count
-
-    def _parse_scanner_profiles(self):
-        """Look for ZAP scanner profiles and DAST profile configs."""
-        count = 0
-        profile_dirs = [
-            os.path.join(self.clone_dir, "profiles"),
-            os.path.join(self.clone_dir, "lib", "gitlab", "ci", "templates", "Security"),
-            os.path.join(self.clone_dir, "ee", "lib", "gitlab", "ci", "templates", "Security"),
-        ]
-
-        for pdir in profile_dirs:
-            if not os.path.isdir(pdir):
-                continue
-            for root, dirs, files in os.walk(pdir):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for fname in sorted(files):
-                    if fname.endswith((".yml", ".yaml", ".json")):
-                        fpath = os.path.join(root, fname)
-                        rel_path = os.path.relpath(fpath, self.clone_dir)
-                        # Only parse DAST-related files
-                        if "dast" in fname.lower() or "dast" in rel_path.lower():
-                            count += self._parse_rule_file(fpath, rel_path)
-
-        return count
-
-    def _parse_rule_file(self, fpath, rel_path):
-        """Parse a single rule/config file for DAST rule definitions."""
-        count = 0
-
+        if yaml is None:
+            return 0
         try:
             with open(fpath, "r", encoding="utf-8") as f:
-                content = f.read()
+                data = yaml.safe_load(f)
         except Exception:
             return 0
 
-        fname = os.path.basename(fpath)
-
-        # Try YAML first, then JSON
-        data = None
-        if fname.endswith((".yml", ".yaml")):
-            if yaml is None:
-                return 0
-            try:
-                data = yaml.safe_load(content)
-            except yaml.YAMLError:
-                return 0
-        elif fname.endswith(".json"):
-            try:
-                data = json.loads(content)
-            except json.JSONDecodeError:
-                return 0
-
         if not isinstance(data, dict):
-            # Non-structured config — still record as a config rule
-            if "dast" in fname.lower():
-                rule_id = f"gitlab-dast:config:{fname}"
-                self.upsert(
-                    rule_id=rule_id,
-                    title=f"GitLab DAST config: {fname}"[:500],
-                    description=f"DAST configuration file {rel_path}.",
-                    severity="medium",
-                    category="dast-config",
-                    language="yaml",
-                    cwe_ids=[],
-                    tags=["gitlab", "dast", "config"],
-                    source_file=rel_path,
-                    rule_content=content[:50000],
-                    rule_format="yaml",
-                    metadata={"config_file": fname},
-                )
-                count += 1
-            return count
+            return 0
 
-        # Look for rule definitions in common structures
-        # Structure 1: rules: [{id, name, severity, ...}]
-        # Structure 2: rules: {id: {severity, ...}}
-        # Structure 3: top-level with id/title fields
-        rules_data = data.get("rules", data.get("checks", data.get("tests", None)))
+        rules = data.get("exclude_rules", [])
+        if not isinstance(rules, list):
+            return 0
 
-        if isinstance(rules_data, list):
-            for item in rules_data:
-                if not isinstance(item, dict):
-                    continue
-                count += self._upsert_rule_from_dict(item, rel_path)
-        elif isinstance(rules_data, dict):
-            for rid, info in rules_data.items():
-                if not isinstance(info, dict):
-                    continue
-                # Inject the key as the ID if missing
-                if "id" not in info:
-                    info = {**info, "id": rid}
-                count += self._upsert_rule_from_dict(info, rel_path)
+        rel_path = os.path.relpath(fpath, self.clone_dir)
+        count = 0
 
-        # If no rules found but it's a DAST config, record the config itself
-        if count == 0 and "dast" in fname.lower():
-            rule_id = f"gitlab-dast:config:{fname}"
-            # Extract variables for description
-            variables = data.get("variables", {})
-            description = f"GitLab DAST configuration from {rel_path}."
-            if isinstance(variables, dict) and variables:
-                description += f" Variables: {json.dumps(variables)[:500]}"
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+
+            rule_id_raw = str(rule.get("rule_id", ""))
+            name = rule.get("name", "")
+            link = rule.get("link", "")
+
+            if not rule_id_raw or not name:
+                continue
+
+            rule_id = f"gitlab-dast:zap-{rule_id_raw}"
 
             self.upsert(
                 rule_id=rule_id,
-                title=f"GitLab DAST config: {fname}"[:500],
-                description=description,
+                title=name,
+                description=(
+                    f"ZAP scanner rule {rule_id_raw} managed by GitLab DAST. "
+                    f"This rule is excluded from DAST scans by default. "
+                    f"Reference: {link}"
+                ),
                 severity="medium",
-                category="dast-config",
-                language="yaml",
+                category="dast",
+                language="",
                 cwe_ids=[],
-                tags=["gitlab", "dast", "config"],
+                tags=["gitlab", "dast", "zap", "excluded"],
                 source_file=rel_path,
-                rule_content=content[:50000],
+                rule_content=(yaml.dump(rule, default_flow_style=False) if yaml else str(rule)),
                 rule_format="yaml",
                 metadata={
-                    "config_file": fname,
-                    "variables": variables if isinstance(variables, dict) else {},
+                    "rule_id_raw": rule_id_raw,
+                    "zap_rule_id": rule_id_raw,
+                    "link": link,
+                    "status": "excluded",
                 },
             )
             count += 1
 
         return count
 
-    def _upsert_rule_from_dict(self, item, rel_path):
-        """Upsert a single rule from a parsed dict."""
-        # Build rule ID
-        rule_id_raw = item.get("id") or item.get("rule_id") or item.get("name") or ""
-        if not rule_id_raw:
+    # ------------------------------------------------------------------
+    # browserker_active_checks.py — Browser-based active check definitions
+    # ------------------------------------------------------------------
+
+    def _parse_browserker_checks(self):
+        """Parse src/config/browserker_active_checks.py for Browserker
+        active check IDs and the ZAP plugin IDs they replace."""
+        fpath = os.path.join(
+            self.clone_dir, "src", "config", "browserker_active_checks.py"
+        )
+        if not os.path.isfile(fpath):
             return 0
 
-        rule_id = f"gitlab-dast:{rule_id_raw}"
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception:
+            return 0
 
-        # Extract title
-        title = item.get("title") or item.get("name") or item.get("description", "") or str(rule_id_raw)
+        rel_path = os.path.relpath(fpath, self.clone_dir)
+        count = 0
 
-        # Extract severity
-        severity_raw = (item.get("severity") or item.get("risk") or "medium").lower()
-        severity_map = {
-            "critical": "critical",
-            "high": "high",
-            "medium": "medium",
-            "moderate": "medium",
-            "low": "low",
-            "info": "info",
-            "informational": "info",
-        }
-        severity = severity_map.get(severity_raw, "medium")
-
-        # Extract CWE
-        cwe_ids = []
-        cwe_raw = item.get("cwe") or item.get("cwe_id") or item.get("cweIds") or ""
-        if cwe_raw:
-            if isinstance(cwe_raw, list):
-                cwe_ids = [str(c) for c in cwe_raw]
-            elif isinstance(cwe_raw, (int, str)):
-                # Extract CWE numbers
-                cwe_nums = re.findall(r"(\d+)", str(cwe_raw))
-                cwe_ids = [f"CWE-{n}" for n in cwe_nums]
-
-        # Extract category
-        category = item.get("category", "dast")
-        tags = ["gitlab", "dast"]
-        if isinstance(item.get("tags"), list):
-            tags.extend(item["tags"])
-        if isinstance(item.get("tags"), str):
-            tags.append(item["tags"])
-
-        # Description
-        desc = item.get("description") or item.get("message") or ""
-
-        self.upsert(
-            rule_id=rule_id,
-            title=title[:500],
-            description=desc[:2000],
-            severity=severity,
-            category=category,
-            language="",
-            cwe_ids=cwe_ids,
-            tags=tags,
-            source_file=rel_path,
-            rule_content=json.dumps(item, indent=2, default=str)[:50000],
-            rule_format="json",
-            metadata={
-                "rule_id_raw": rule_id_raw,
-                "severity_raw": severity_raw,
-                "confidence": item.get("confidence", ""),
-            },
+        # Parse BrowserkerActiveCheck entries:
+        #   BrowserkerActiveCheck('1336.1', replaced_zap_checks=['90035'], alpha=False)
+        #   BrowserkerActiveCheck('94.4', replaced_zap_checks=['90019'], alpha=False, callback_attacks=['94.4.2'])
+        pattern = re.compile(
+            r"BrowserkerActiveCheck\(\s*"
+            r"'([^']+)'\s*,\s*"          # check_id
+            r"replaced_zap_checks=\[([^\]]*)\]\s*,\s*"  # replaced checks
+            r"alpha=(True|False)"        # alpha flag
+            r"(?:,\s*callback_attacks=\[([^\]]*)\])?"  # optional callback attacks
+            r"\s*\)"
         )
-        return 1
+
+        for m in pattern.finditer(content):
+            check_id = m.group(1)
+            replaced_raw = m.group(2).strip()
+            alpha = m.group(3) == "True"
+            callback_raw = m.group(4) or ""
+
+            # Parse replaced ZAP check IDs
+            replaced_ids = re.findall(r"'(\d+)'", replaced_raw)
+            callback_attacks = re.findall(r"'([\d.]+)'", callback_raw)
+
+            rule_id = f"gitlab-dast:browserker-{check_id}"
+
+            # Build description
+            desc = f"Browserker browser-based active check {check_id}"
+            if replaced_ids:
+                desc += f". Replaces ZAP plugin IDs: {', '.join(replaced_ids)}"
+            if alpha:
+                desc += " (alpha)"
+            if callback_attacks:
+                desc += f". Callback attacks: {', '.join(callback_attacks)}"
+
+            self.upsert(
+                rule_id=rule_id,
+                title=f"Browserker Check {check_id}",
+                description=desc,
+                severity="high" if not alpha else "medium",
+                category="dast-active",
+                language="python",
+                cwe_ids=[],
+                tags=["gitlab", "dast", "browserker", "active", "alpha" if alpha else "stable"],
+                source_file=rel_path,
+                rule_content=content[:50000],
+                rule_format="python",
+                metadata={
+                    "check_id": check_id,
+                    "replaced_zap_checks": replaced_ids,
+                    "alpha": alpha,
+                    "callback_attacks": callback_attacks,
+                },
+            )
+            count += 1
+
+        return count
+
+    # ------------------------------------------------------------------
+    # Expected JSON test reports — vulnerability metadata
+    # ------------------------------------------------------------------
+
+    def _parse_expected_reports(self):
+        """Parse test/end-to-end/expect/*.json for vulnerability definitions
+        with full metadata (name, severity, CWE, description, identifiers)."""
+        report_files = glob.glob(
+            os.path.join(
+                self.clone_dir, "test", "end-to-end", "expect", "*.json"
+            )
+        )
+
+        # Deduplicate by rule identifier (ZAProxy plugin ID or browserker check ID)
+        seen = set()
+        count = 0
+
+        for fpath in sorted(report_files):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, Exception):
+                continue
+
+            vulns = data.get("vulnerabilities", [])
+            if not isinstance(vulns, list):
+                continue
+
+            rel_path = os.path.relpath(fpath, self.clone_dir)
+
+            for vuln in vulns:
+                if not isinstance(vuln, dict):
+                    continue
+
+                name = vuln.get("name", "")
+                severity = _SEVERITY_MAP.get(
+                    (vuln.get("severity") or "medium").lower(), "medium"
+                )
+                desc = vuln.get("description", "")
+                solution = vuln.get("solution", "") or vuln.get("remediation", "")
+                references = vuln.get("links", [])
+
+                # Extract identifiers
+                identifiers = vuln.get("identifiers", [])
+                zap_plugin_id = None
+                cwe_id = None
+                browserker_id = None
+
+                if isinstance(identifiers, list):
+                    for ident in identifiers:
+                        if not isinstance(ident, dict):
+                            continue
+                        ident_type = ident.get("type", "")
+                        ident_value = str(ident.get("value", ""))
+                        ident_name = ident.get("name", "")
+
+                        if ident_type == "ZAProxy_PluginId":
+                            zap_plugin_id = ident_value
+                        elif ident_type == "CWE":
+                            cwe_id = ident_value
+                        elif ident_type == "browserker":
+                            browserker_id = ident_value
+
+                # Determine the primary rule ID
+                # Prefer ZAP plugin ID, then browserker ID
+                primary_id = zap_plugin_id or browserker_id
+                if not primary_id or not name:
+                    continue
+
+                # Deduplicate
+                dedup_key = primary_id
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                rule_id = f"gitlab-dast:{primary_id}"
+
+                cwe_ids = []
+                if cwe_id:
+                    cwe_nums = re.findall(r"(\d+)", str(cwe_id))
+                    cwe_ids = [f"CWE-{n}" for n in cwe_nums]
+
+                # Build reference links
+                ref_urls = []
+                if isinstance(references, list):
+                    for ref in references:
+                        if isinstance(ref, dict) and ref.get("url"):
+                            ref_urls.append(ref["url"])
+                        elif isinstance(ref, str):
+                            ref_urls.append(ref)
+
+                full_desc = desc[:2000] if desc else name
+                if solution:
+                    full_desc += f"\n\nSolution: {solution[:500]}"
+
+                self.upsert(
+                    rule_id=rule_id,
+                    title=name[:500],
+                    description=full_desc,
+                    severity=severity,
+                    category="dast",
+                    language="",
+                    cwe_ids=cwe_ids,
+                    tags=["gitlab", "dast", "expected-vuln"],
+                    source_file=rel_path,
+                    rule_content=json.dumps(vuln, indent=2, default=str)[:50000],
+                    rule_format="json",
+                    metadata={
+                        "zap_plugin_id": zap_plugin_id or "",
+                        "browserker_id": browserker_id or "",
+                        "cwe_id": cwe_id or "",
+                        "severity_raw": vuln.get("severity", ""),
+                        "references": ref_urls[:10],
+                    },
+                )
+                count += 1
+
+        return count
