@@ -5,13 +5,16 @@ running web applications for vulnerabilities. The DAST analyzer is at
 gitlab.com/gitlab-org/security-products/dast and is built on the OWASP ZAP
 scanner with GitLab-specific rule profiles and Browserker-based active checks.
 
-Rule sources in the repo:
-  - src/config/exclude_rules.yml: ZAP rules that GitLab DAST excludes, each
-    with rule_id, name, and a link to zaproxy.org docs.
-  - src/config/browserker_active_checks.py: Browserker active check IDs with
-    the ZAP plugin IDs they replace.
-  - test/end-to-end/expect/*.json: Expected vulnerability reports with full
-    metadata (name, severity, CWE, description, identifiers).
+Rule sources:
+  1. OWASP ZAP alerts index (zaproxy.org/docs/alerts/) — the full ZAP scan
+     rule catalog (262 rules with ID, name, status, risk, type, CWE, WASC).
+     DAST is built on ZAP and uses these rules as its scanning engine.
+  2. src/config/exclude_rules.yml — ZAP rules that GitLab DAST explicitly
+     excludes, each with rule_id, name, and a link to zaproxy.org docs.
+  3. src/config/browserker_active_checks.py — Browserker active check IDs
+     with the ZAP plugin IDs they replace.
+  4. test/end-to-end/expect/*.json — Expected vulnerability reports with full
+     metadata (name, severity, CWE, description, identifiers).
 """
 
 import os
@@ -19,6 +22,9 @@ import re
 import json
 import glob
 import logging
+import html as html_mod
+
+import requests
 
 try:
     import yaml
@@ -29,6 +35,9 @@ from .base import BaseCollector
 
 logger = logging.getLogger(__name__)
 
+ZAP_ALERTS_URL = "https://www.zaproxy.org/docs/alerts/"
+REQUEST_TIMEOUT = 60
+
 _SEVERITY_MAP = {
     "critical": "critical",
     "high": "high",
@@ -37,6 +46,14 @@ _SEVERITY_MAP = {
     "low": "low",
     "info": "info",
     "informational": "info",
+}
+
+_RISK_MAP = {
+    "high": "high",
+    "medium": "medium",
+    "low": "low",
+    "informational": "info",
+    "info": "info",
 }
 
 
@@ -55,22 +72,123 @@ class GitLabDASTCollector(BaseCollector):
     logo_url = "https://avatars.githubusercontent.com/u/10669714"
 
     def collect_rules(self):
-        """Parse all DAST rule sources in the repo."""
+        """Parse all DAST rule sources."""
         count = 0
 
-        # 1) Parse exclude_rules.yml for ZAP rule IDs/names that DAST manages
+        # 1) Scrape the full ZAP alerts catalog from zaproxy.org
+        #    DAST is built on ZAP and uses these scan rules.
+        count += self._parse_zap_alerts()
+
+        # 2) Parse exclude_rules.yml for ZAP rule IDs/names that DAST excludes
         count += self._parse_exclude_rules()
 
-        # 2) Parse browserker_active_checks.py for browser-based active checks
+        # 3) Parse browserker_active_checks.py for browser-based active checks
         count += self._parse_browserker_checks()
 
-        # 3) Parse expected JSON test reports for vulnerability metadata
+        # 4) Parse expected JSON test reports for vulnerability metadata
         count += self._parse_expected_reports()
 
         logger.info(f"[gitlab_dast] Processed {count} rules")
 
     # ------------------------------------------------------------------
-    # exclude_rules.yml — ZAP rules that GitLab DAST manages
+    # ZAP alerts index — full ZAP scan rule catalog
+    # ------------------------------------------------------------------
+
+    def _parse_zap_alerts(self):
+        """Scrape zaproxy.org/docs/alerts/ for the full ZAP scan rule
+        catalog (IDs, names, severity, CWE, WASC, type, status)."""
+        try:
+            resp = requests.get(ZAP_ALERTS_URL, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            html = resp.text
+        except Exception as e:
+            logger.warning(f"[gitlab_dast] Failed to fetch ZAP alerts: {e}")
+            return 0
+
+        # Parse the table rows: 7 columns (ID, Name, Status, Risk, Type, CWE, WASC)
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL)
+
+        seen_ids = set()
+        count = 0
+
+        for r in rows:
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", r, re.DOTALL)
+            if len(cells) != 7:
+                continue
+
+            clean_cells = []
+            for c in cells:
+                clean = re.sub(r"<[^>]+>", " ", c)
+                clean = html_mod.unescape(clean)
+                clean = re.sub(r"\s+", " ", clean).strip()
+                clean_cells.append(clean)
+
+            alert_id, name, status, risk, alert_type, cwe, wasc = clean_cells
+
+            # Skip header row
+            if alert_id.lower() in ("alert id", ""):
+                continue
+
+            # Skip variant rows (e.g. "3-1", "6-2") — keep only base IDs
+            if "-" in alert_id:
+                continue
+
+            if alert_id in seen_ids or not name:
+                continue
+            seen_ids.add(alert_id)
+
+            # Map risk to severity
+            risk_lower = risk.lower()
+            severity = _RISK_MAP.get(risk_lower, "medium")
+
+            # Parse CWE
+            cwe_ids = []
+            if cwe and cwe.isdigit():
+                cwe_ids.append(f"CWE-{cwe}")
+
+            # Build tags
+            tags = ["gitlab", "dast", "zap", alert_type.lower() if alert_type else ""]
+            if status:
+                tags.append(status.lower())
+            tags = [t for t in tags if t]
+
+            rule_id = f"gitlab-dast:zap-{alert_id}"
+
+            self.upsert(
+                rule_id=rule_id,
+                title=name,
+                description=(
+                    f"OWASP ZAP scan rule {alert_id}: {name}. "
+                    f"Type: {alert_type}. Status: {status}. "
+                    f"Risk: {risk or 'unknown'}."
+                ),
+                severity=severity,
+                category="dast",
+                language="",
+                cwe_ids=cwe_ids,
+                owasp_ids=[],
+                tags=tags,
+                source_file=ZAP_ALERTS_URL,
+                rule_content="",
+                rule_format="html",
+                metadata={
+                    "zap_rule_id": alert_id,
+                    "name": name,
+                    "status": status,
+                    "risk": risk,
+                    "type": alert_type,
+                    "cwe": cwe,
+                    "wasc": wasc,
+                    "source": "zaproxy.org/docs/alerts",
+                },
+            )
+            count += 1
+
+        logger.info(f"[gitlab_dast] ZAP alerts: {count} rules")
+        return count
+
+    # ------------------------------------------------------------------
+    # exclude_rules.yml — ZAP rules that GitLab DAST excludes
     # ------------------------------------------------------------------
 
     def _parse_exclude_rules(self):
@@ -125,9 +243,12 @@ class GitLabDASTCollector(BaseCollector):
                 category="dast",
                 language="",
                 cwe_ids=[],
+                owasp_ids=[],
                 tags=["gitlab", "dast", "zap", "excluded"],
                 source_file=rel_path,
-                rule_content=(yaml.dump(rule, default_flow_style=False) if yaml else str(rule)),
+                rule_content=(
+                    yaml.dump(rule, default_flow_style=False) if yaml else str(rule)
+                ),
                 rule_format="yaml",
                 metadata={
                     "rule_id_raw": rule_id_raw,
@@ -138,6 +259,7 @@ class GitLabDASTCollector(BaseCollector):
             )
             count += 1
 
+        logger.info(f"[gitlab_dast] Exclude rules: {count} rules")
         return count
 
     # ------------------------------------------------------------------
@@ -164,10 +286,9 @@ class GitLabDASTCollector(BaseCollector):
 
         # Parse BrowserkerActiveCheck entries:
         #   BrowserkerActiveCheck('1336.1', replaced_zap_checks=['90035'], alpha=False)
-        #   BrowserkerActiveCheck('94.4', replaced_zap_checks=['90019'], alpha=False, callback_attacks=['94.4.2'])
         pattern = re.compile(
             r"BrowserkerActiveCheck\(\s*"
-            r"'([^']+)'\s*,\s*"          # check_id
+            r"'([^']+)'[^,]*,\s*"          # check_id
             r"replaced_zap_checks=\[([^\]]*)\]\s*,\s*"  # replaced checks
             r"alpha=(True|False)"        # alpha flag
             r"(?:,\s*callback_attacks=\[([^\]]*)\])?"  # optional callback attacks
@@ -180,13 +301,11 @@ class GitLabDASTCollector(BaseCollector):
             alpha = m.group(3) == "True"
             callback_raw = m.group(4) or ""
 
-            # Parse replaced ZAP check IDs
             replaced_ids = re.findall(r"'(\d+)'", replaced_raw)
             callback_attacks = re.findall(r"'([\d.]+)'", callback_raw)
 
             rule_id = f"gitlab-dast:browserker-{check_id}"
 
-            # Build description
             desc = f"Browserker browser-based active check {check_id}"
             if replaced_ids:
                 desc += f". Replaces ZAP plugin IDs: {', '.join(replaced_ids)}"
@@ -203,7 +322,9 @@ class GitLabDASTCollector(BaseCollector):
                 category="dast-active",
                 language="python",
                 cwe_ids=[],
-                tags=["gitlab", "dast", "browserker", "active", "alpha" if alpha else "stable"],
+                owasp_ids=[],
+                tags=["gitlab", "dast", "browserker", "active",
+                      "alpha" if alpha else "stable"],
                 source_file=rel_path,
                 rule_content=content[:50000],
                 rule_format="python",
@@ -216,6 +337,7 @@ class GitLabDASTCollector(BaseCollector):
             )
             count += 1
 
+        logger.info(f"[gitlab_dast] Browserker checks: {count} rules")
         return count
 
     # ------------------------------------------------------------------
@@ -231,7 +353,6 @@ class GitLabDASTCollector(BaseCollector):
             )
         )
 
-        # Deduplicate by rule identifier (ZAProxy plugin ID or browserker check ID)
         seen = set()
         count = 0
 
@@ -260,7 +381,6 @@ class GitLabDASTCollector(BaseCollector):
                 solution = vuln.get("solution", "") or vuln.get("remediation", "")
                 references = vuln.get("links", [])
 
-                # Extract identifiers
                 identifiers = vuln.get("identifiers", [])
                 zap_plugin_id = None
                 cwe_id = None
@@ -281,13 +401,10 @@ class GitLabDASTCollector(BaseCollector):
                         elif ident_type == "browserker":
                             browserker_id = ident_value
 
-                # Determine the primary rule ID
-                # Prefer ZAP plugin ID, then browserker ID
                 primary_id = zap_plugin_id or browserker_id
                 if not primary_id or not name:
                     continue
 
-                # Deduplicate
                 dedup_key = primary_id
                 if dedup_key in seen:
                     continue
@@ -300,7 +417,6 @@ class GitLabDASTCollector(BaseCollector):
                     cwe_nums = re.findall(r"(\d+)", str(cwe_id))
                     cwe_ids = [f"CWE-{n}" for n in cwe_nums]
 
-                # Build reference links
                 ref_urls = []
                 if isinstance(references, list):
                     for ref in references:
@@ -321,6 +437,7 @@ class GitLabDASTCollector(BaseCollector):
                     category="dast",
                     language="",
                     cwe_ids=cwe_ids,
+                    owasp_ids=[],
                     tags=["gitlab", "dast", "expected-vuln"],
                     source_file=rel_path,
                     rule_content=json.dumps(vuln, indent=2, default=str)[:50000],
@@ -335,4 +452,5 @@ class GitLabDASTCollector(BaseCollector):
                 )
                 count += 1
 
+        logger.info(f"[gitlab_dast] Expected reports: {count} rules")
         return count
