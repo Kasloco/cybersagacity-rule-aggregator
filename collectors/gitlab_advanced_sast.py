@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 class GitLabAdvancedSASTCollector(BaseCollector):
     name = "gitlab_advanced_sast"
     display_name = "GitLab Advanced SAST"
-    source_type = "github"
-    source_url = "https://github.com/gitlab-org/security-products/analyzers.git"
+    source_type = "gitlab"
+    source_url = "https://gitlab.com/gitlab-org/security-products/sast-rules.git"
     description = (
         "GitLab Advanced SAST provides cross-file/cross-function taint "
         "analysis for C/C++, C#, Java, JavaScript, PHP, Python, and Scala. "

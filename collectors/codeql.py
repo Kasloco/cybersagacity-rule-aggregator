@@ -47,21 +47,41 @@ class CodeQLCollector(BaseCollector):
     )
     logo_url = "https://avatars.githubusercontent.com/u/53879551"
 
+    def clone_or_pull(self):
+        """Override to use sparse checkout — CodeQL is 500MB+ but we only need ql/src/."""
+        import subprocess
+        os.makedirs(os.path.dirname(self.clone_dir), exist_ok=True)
+        if os.path.exists(os.path.join(self.clone_dir, ".git")):
+            logger.info(f"[{self.name}] Pulling latest changes...")
+            subprocess.run(["git", "-C", self.clone_dir, "pull"], check=True)
+        else:
+            logger.info(f"[{self.name}] Cloning {self.source_url} (sparse: ql/src only)...")
+            # Clone with no checkout, then sparse checkout only ql/src/
+            subprocess.run([
+                "git", "clone", "--depth=1", "--single-branch",
+                "--filter=blob:none", "--no-checkout",
+                self.source_url, self.clone_dir,
+            ], check=True)
+            subprocess.run(["git", "-C", self.clone_dir, "sparse-checkout", "init", "--cone"], check=True)
+            subprocess.run(["git", "-C", self.clone_dir, "sparse-checkout", "set", "ql/src"], check=True)
+            subprocess.run(["git", "-C", self.clone_dir, "checkout"], check=True)
+        import git as gitpython
+        return gitpython.Repo(self.clone_dir)
+
     def collect_rules(self):
         count = 0
 
-        # CodeQL security queries are in ql/src/<lang>/Security/
-        ql_src = os.path.join(self.clone_dir, "ql", "src")
-        if not os.path.isdir(ql_src):
-            logger.warning("[codeql] ql/src directory not found")
-            return
-
-        # Walk all language directories looking for .ql files
-        for root, dirs, files in os.walk(ql_src):
-            # Skip test directories
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "test"]
+        # CodeQL repo structure: <lang>/ql/src/Security/CWE-xxx/RuleName.ql
+        # Languages: cpp, csharp, go, java, javascript, python, ruby, swift
+        # Also check ql/src/ for any top-level structure
+        for root, dirs, files in os.walk(self.clone_dir):
+            # Skip test, downgrades, and hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("test", "downgrades", "node_modules")]
             for fname in files:
                 if not fname.endswith(".ql"):
+                    continue
+                # Only include .ql files under Security/ directories
+                if "/Security/" not in root and "/security/" not in root.lower():
                     continue
                 fpath = os.path.join(root, fname)
                 rel_path = os.path.relpath(fpath, self.clone_dir)

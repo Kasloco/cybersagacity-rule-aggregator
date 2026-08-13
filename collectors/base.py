@@ -106,7 +106,7 @@ class BaseCollector(ABC):
         logger.info(f"[{self.name}] Starting sync (id={self.sync_id})...")
 
         try:
-            if self.source_type == "github":
+            if self.source_type in ("github", "gitlab", "bitbucket"):
                 self.clone_or_pull()
                 if not force and not self.has_changes():
                     logger.info(f"[{self.name}] No changes since last sync, skipping.")
