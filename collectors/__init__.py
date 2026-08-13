@@ -38,6 +38,23 @@ from .tfsec import TfsecCollector
 from .psalm import PsalmCollector
 from .dependency_check import DependencyCheckCollector
 from .retirejs import RetireJsCollector
+from .trufflehog import TruffleHogCollector
+from .osv_scanner import OSVScannerCollector
+from .gitlab_dast import GitLabDASTCollector
+from .coverity import CoverityCollector
+from .dlint import DlintCollector
+from .njsscan import NjsscanCollector
+from .nodejsscan import NodejsscanCollector
+from .phpcs_security_audit import PhpcsSecurityAuditCollector
+from .security_code_scan import SecurityCodeScanCollector
+from .gitleaks import GitleaksCollector
+from .grype import GrypeCollector
+from .codeql import CodeQLCollector
+from .joern import JoernCollector
+from .mobsf import MobSFCollector
+from .owasp_zap import OWASPZapCollector
+from .errorprone import ErrorProneCollector
+from .fortify import FortifyCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -74,4 +91,21 @@ ALL_COLLECTORS = [
     PsalmCollector,
     DependencyCheckCollector,
     RetireJsCollector,
+    TruffleHogCollector,
+    OSVScannerCollector,
+    GitLabDASTCollector,
+    CoverityCollector,
+    DlintCollector,
+    NjsscanCollector,
+    NodejsscanCollector,
+    PhpcsSecurityAuditCollector,
+    SecurityCodeScanCollector,
+    GitleaksCollector,
+    GrypeCollector,
+    CodeQLCollector,
+    JoernCollector,
+    MobSFCollector,
+    OWASPZapCollector,
+    ErrorProneCollector,
+    FortifyCollector,
 ]
