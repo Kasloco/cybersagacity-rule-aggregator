@@ -1,651 +1,342 @@
-"""Collector for OpenText Fortify SCA static analysis rules.
+"""Collector for Fortify Software Security Errors from vulncat.fortify.com.
 
-Fortify SCA (Static Code Analyzer) is a commercial static analysis tool
-by OpenText (formerly Micro Focus, HP). The rule set is proprietary and
-not publicly available in a Git repository. Fortify rules are organized
-into "rulepacks" and cover security vulnerabilities, code quality, and
-configuration issues across many languages.
+This collector scrapes the public Fortify Taxonomy at
+https://vulncat.fortify.com/en — a catalog of software security
+errors maintained by the Fortify Software Security Research Group
+together with Dr. Gary McGraw.
 
-Public documentation is available at:
-  - https://www.microfocus.com/documentation/fortify/
-  - https://www.opentext.com/products/fortify-static-code-analyzer
+The taxonomy organizes vulnerability categories ("phyla") into 8
+"kingdoms":
+  1. Input Validation and Representation
+  2. API Abuse
+  3. Security Features
+  4. Time and State
+  5. Errors
+  6. Code Quality
+  7. Encapsulation
+  8. Environment
 
-Fortify can export findings in several formats:
-  1. FPR (Fortify Project Results) — XML-based, contains audit findings
-     with rule IDs, categories, and CWE mappings.
-  2. SARIF — Fortify can export SARIF results which include rule metadata.
-  3. XLSX/CSV — Spreadsheet exports with checker categories and descriptions.
-  4. Fortify rulepack XML — Internal rulepack format with rule definitions.
+Each kingdom listing is paginated (20 weaknesses per page).  Each
+weakness entry contains a title, an abstract description, and
+language tabs indicating which programming languages the rule
+applies to.
 
-This collector uses source_type='file' — it does NOT clone a repository.
-Instead, it imports Fortify rules from local/exported files in these
-formats:
-
-To use this collector:
-  a. Export Fortify rules/findings in SARIF, FPR (XML), CSV, or XLSX format.
-  b. Place the files in the directory specified by the
-     FORTIFY_RULES_DIR environment variable (default:
-     /tmp/cybersagacity-rules/fortify/).
-  c. Run the collector — it will parse all supported files in that directory.
-
-The collector can be extended with a proper importer when OpenText
-publishes a public rules repository.
+The collector uses source_type='web' and overrides clone_or_pull()
+to be a no-op since there is no Git repository to clone.
 """
 
-import os
-import csv
-import json
 import logging
 import re
-import xml.etree.ElementTree as ET
+import time
+import urllib.parse
 
 from .base import BaseCollector
 
 logger = logging.getLogger(__name__)
 
-# Fortify impact → normalized severity
-SEVERITY_MAP = {
-    "critical": "critical",
-    "high": "high",
-    "medium": "medium",
-    "moderate": "medium",
-    "low": "low",
-    "info": "info",
-    "informational": "info",
+# ---------------------------------------------------------------------------
+# Kingdom → severity mapping (in order of importance per the taxonomy)
+# ---------------------------------------------------------------------------
+KINGDOM_SEVERITY = {
+    "Input Validation and Representation": "high",
+    "API Abuse": "medium",
+    "Security Features": "high",
+    "Time and State": "medium",
+    "Errors": "medium",
+    "Code Quality": "low",
+    "Encapsulation": "medium",
+    "Environment": "low",
 }
 
-# Fortify category → normalized category
-CATEGORY_MAP = {
-    "buffer overflow": "memory-safety",
-    "buffer overflow (cwe-120)": "memory-safety",
-    "code injection": "injection",
-    "command injection": "injection",
-    "cross-site request forgery": "csrf",
-    "cross-site scripting": "xss",
-    "denial of service": "dos",
-    "file disclosure": "information-disclosure",
-    "insecure randomness": "crypto",
-    "insecure temporary file": "filesystem",
-    "insecure transport": "crypto",
-    "json injection": "injection",
-    "ldap injection": "injection",
-    "log forging": "injection",
-    "missing authorization": "auth",
-    "missing encryption": "crypto",
-    "missing input validation": "input-validation",
-    "missing xml validation": "input-validation",
-    "null dereference": "correctness",
-    "os command injection": "injection",
-    "password management": "secrets",
-    "path manipulation": "path-traversal",
-    "poor error handling": "error-handling",
-    "poor logging": "logging",
-    "privacy violation": "privacy",
-    "race condition": "concurrency",
-    "resource injection": "injection",
-    "security misconfiguration": "misconfiguration",
-    "sql injection": "sqli",
-    "xss": "xss",
-    "xml external entity": "xxe",
-    "xpath injection": "injection",
+# Kingdom → normalized category
+KINGDOM_CATEGORY = {
+    "Input Validation and Representation": "input-validation",
+    "API Abuse": "api-abuse",
+    "Security Features": "security-features",
+    "Time and State": "concurrency",
+    "Errors": "error-handling",
+    "Code Quality": "code-quality",
+    "Encapsulation": "encapsulation",
+    "Environment": "environment",
 }
+
+BASE_URL = "https://vulncat.fortify.com/en"
+KINGDOMS = list(KINGDOM_SEVERITY.keys())
 
 
 class FortifyCollector(BaseCollector):
     name = "fortify"
     display_name = "Fortify SCA (OpenText)"
-    source_type = "file"
-    source_url = (
-        "https://www.microfocus.com/documentation/fortify/"
-    )
+    source_type = "web"
+    source_url = "https://vulncat.fortify.com/en"
     description = (
-        "OpenText Fortify Static Code Analyzer is a commercial static "
-        "analysis tool that detects security vulnerabilities across many "
-        "languages. Rules are organized into rulepacks covering injection, "
-        "XSS, crypto, path traversal, configuration, and more. Each finding "
-        "maps to CWEs and OWASP categories. This collector imports rules from "
-        "exported SARIF, FPR (XML), CSV, or XLSX files."
+        "OpenText Fortify Taxonomy of Software Security Errors — a public "
+        "catalog of security vulnerability categories organized into 8 "
+        "kingdoms (Input Validation, API Abuse, Security Features, Time & "
+        "State, Errors, Code Quality, Encapsulation, Environment). Each "
+        "weakness includes an abstract, supported languages, and references "
+        "to CWE, OWASP, and other standards. Scraped from "
+        "vulncat.fortify.com."
     )
-    logo_url = "https://www.microfocus.com/etc/clientlibs/microfocus/clientlibs/base/img/favicon.ico"
+    logo_url = (
+        "https://www.microfocus.com/etc/clientlibs/microfocus/clientlibs/"
+        "base/img/favicon.ico"
+    )
 
+    # ------------------------------------------------------------------
+    # Lifecycle overrides
+    # ------------------------------------------------------------------
+    def clone_or_pull(self):  # type: ignore[override]
+        """No-op — there is no Git repository to clone for this web source."""
+        logger.info(f"[{self.name}] Web source — no clone/pull needed.")
+        return None
+
+    def has_changes(self):
+        """Web source — always re-scrape unless caller passes force=False
+        and the vendor row has a commit SHA (which it won't for web sources).
+        Returning True ensures sync() always proceeds."""
+        return True
+
+    def save_commit_sha(self):
+        """No commit SHA for web sources; record the sync timestamp instead."""
+        import datetime
+        try:
+            from database import get_db
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE vendors SET last_commit_sha=? WHERE name=?",
+                    (datetime.datetime.utcnow().isoformat(), self.name),
+                )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Main collection logic
+    # ------------------------------------------------------------------
     def collect_rules(self):
-        """Import Fortify rules from local file exports.
+        """Scrape all weakness entries from vulncat.fortify.com/en.
 
-        This collector reads from the directory specified by the
-        FORTIFY_RULES_DIR environment variable (or the default clone_dir).
-        Supported file formats: .sarif, .fpr, .xml, .csv, .xlsx
-
-        See the module docstring for instructions on exporting Fortify rules.
+        Iterates over each kingdom, paginates through all results, and
+        registers each weakness as a rule.
         """
-        rules_dir = os.environ.get(
-            "FORTIFY_RULES_DIR",
-            self.clone_dir,
-        )
-
-        if not os.path.isdir(rules_dir):
-            logger.info(
-                f"[fortify] Rules directory {rules_dir} not found. "
-                f"Export Fortify rules (SARIF/FPR/CSV/XLSX) and place them there. "
-                f"Set FORTIFY_RULES_DIR to override."
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+        except ImportError:
+            logger.error(
+                "[fortify] requests and beautifulsoup4 are required. "
+                "Install with: pip install requests beautifulsoup4"
             )
             return
 
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+
         count = 0
-        for fname in sorted(os.listdir(rules_dir)):
-            fpath = os.path.join(rules_dir, fname)
-            if not os.path.isfile(fpath):
-                continue
-
-            if fname.endswith(".sarif") or (
-                fname.endswith(".json") and "fortify" in fname.lower()
-            ):
-                count += self._parse_sarif(fpath)
-            elif fname.endswith((".fpr", ".xml")):
-                count += self._parse_fpr_xml(fpath)
-            elif fname.endswith(".csv"):
-                count += self._parse_csv(fpath)
-            elif fname.endswith(".xlsx"):
-                count += self._parse_xlsx(fpath)
-
-        logger.info(f"[fortify] Imported {count} rules from {rules_dir}")
-
-    def _parse_sarif(self, fpath):
-        """Parse a SARIF file for Fortify rule definitions."""
-        count = 0
-
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            logger.warning(f"[fortify] Failed to parse SARIF: {fpath}")
-            return 0
-
-        for run in data.get("runs", []):
-            driver = run.get("tool", {}).get("driver", {})
-            rules = driver.get("rules", [])
-
-            for rule in rules:
-                rule_id = rule.get("id", "")
-                if not rule_id:
-                    continue
-
-                if not rule_id.startswith("fortify:"):
-                    full_rule_id = f"fortify:{rule_id}"
-                else:
-                    full_rule_id = rule_id
-
-                properties = rule.get("properties", {})
-                full_desc = rule.get("fullDescription", {}).get("text", "")
-                short_desc = rule.get("shortDescription", {}).get("text", "")
-                name = rule.get("name", rule_id)
-
-                # Severity
-                level = rule.get("defaultConfiguration", {}).get("level", "warning")
-                severity_raw = properties.get("severity", properties.get("impact", level))
-                severity = SEVERITY_MAP.get(str(severity_raw).lower(), "medium")
-
-                # CWE
-                cwe_ids = []
-                cwe_raw = properties.get("cwe", properties.get("cweId", ""))
-                if cwe_raw:
-                    if isinstance(cwe_raw, list):
-                        cwe_ids = [str(c) for c in cwe_raw]
-                    else:
-                        cwe_nums = re.findall(r"(\d+)", str(cwe_raw))
-                        cwe_ids = [f"CWE-{n}" for n in cwe_nums]
-
-                # Category
-                fortify_category = properties.get("category", "")
-                category = CATEGORY_MAP.get(
-                    fortify_category.lower().strip(), "security"
+        for kingdom in KINGDOMS:
+            try:
+                count += self._scrape_kingdom(
+                    session, kingdom, BeautifulSoup
+                )
+            except Exception as e:
+                logger.error(
+                    f"[fortify] Error scraping kingdom '{kingdom}': {e}",
+                    exc_info=True,
                 )
 
-                # OWASP
-                owasp_ids = []
-                owasp_raw = properties.get("owasp", "")
-                if owasp_raw:
-                    if isinstance(owasp_raw, list):
-                        owasp_ids = [str(o) for o in owasp_raw]
-                    else:
-                        owasp_ids = [str(owasp_raw)]
+        logger.info(f"[fortify] Scraped {count} rules from {BASE_URL}")
 
-                tags = ["fortify", "sast", category]
-                if fortify_category:
-                    tags.append(fortify_category.lower().replace(" ", "-"))
+    def _scrape_kingdom(self, session, kingdom, BeautifulSoup):
+        """Scrape all weakness pages for a single kingdom.
 
-                self.upsert(
-                    rule_id=full_rule_id,
-                    title=f"Fortify {name}: {short_desc}"[:500],
-                    description=full_desc or short_desc,
-                    severity=severity,
-                    category=category,
-                    language=properties.get("language", ""),
-                    cwe_ids=cwe_ids,
-                    owasp_ids=owasp_ids,
-                    tags=tags,
-                    source_file=fpath,
-                    rule_content=json.dumps(rule, indent=2, default=str)[:50000],
-                    rule_format="sarif",
-                    metadata={
-                        "checker_id": rule_id,
-                        "checker_name": name,
-                        "fortify_category": fortify_category,
-                        "impact": properties.get("impact", ""),
-                        "accuracy": properties.get("accuracy", ""),
-                        "source": "sarif-import",
-                    },
+        Returns the number of rules registered.
+        """
+        count = 0
+        page = 1
+        max_page = 1
+
+        while page <= max_page:
+            url = self._kingdom_url(kingdom, page)
+            logger.info(
+                f"[fortify] Fetching kingdom='{kingdom}' page={page}/{max_page}"
+            )
+
+            try:
+                resp = session.get(url, timeout=60)
+                resp.raise_for_status()
+            except Exception as e:
+                logger.warning(f"[fortify] Failed to fetch {url}: {e}")
+                break
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Determine max_page from pagination on the first page
+            if page == 1:
+                max_page = self._get_max_page(soup)
+                logger.info(
+                    f"[fortify] Kingdom '{kingdom}' has {max_page} pages"
                 )
-                count += 1
 
-        return count
+            # Parse weakness cells on this page
+            cells = soup.find_all("div", class_="weaknessCell")
+            if not cells:
+                logger.info(
+                    f"[fortify] No weakness cells on page {page}, stopping."
+                )
+                break
 
-    def _parse_fpr_xml(self, fpath):
-        """Parse a Fortify FPR (XML) or rulepack XML file for rule definitions.
-
-        FPR files contain an Audit section with issue instances, each
-        referencing a rule by its InstanceID/CategoryID. Rulepack XML
-        files contain RuleDefinition elements with metadata.
-        """
-        count = 0
-
-        try:
-            tree = ET.parse(fpath)
-        except ET.ParseError:
-            logger.warning(f"[fortify] Failed to parse XML/FPR: {fpath}")
-            return 0
-
-        root = tree.getroot()
-
-        # FPR structure: <FPR> → <Description> → <MetaInfo> with ClassInfo
-        # Rulepack structure: <RulePack> → <RuleDefinition> elements
-
-        # Try rulepack format first
-        ns = ""
-        # Detect namespace if present
-        if root.tag.startswith("{"):
-            ns = root.tag.split("}")[0] + "}"
-
-        # Look for RuleDefinition elements (rulepack format)
-        rule_defs = root.findall(
-            f".//{ns}RuleDefinition"
-        ) or root.findall(".//RuleDefinition")
-
-        if rule_defs:
-            for rd in rule_defs:
-                count += self._parse_rule_definition(rd, fpath)
-        else:
-            # Try FPR audit format — extract unique rule categories from findings
-            count += self._parse_fpr_audit(root, ns, fpath)
-
-        tree = None  # release
-        return count
-
-    def _parse_rule_definition(self, rd, fpath):
-        """Parse a single RuleDefinition element from a rulepack XML."""
-        ns = ""
-        if rd.tag.startswith("{"):
-            ns = rd.tag.split("}")[0] + "}"
-
-        rule_id = (
-            rd.get("id")
-            or rd.get("ruleId")
-            or self._xml_text(rd, f"{ns}RuleID")
-            or self._xml_text(rd, "RuleID")
-            or self._xml_text(rd, f"{ns}Id")
-            or ""
-        )
-        if not rule_id:
-            return 0
-
-        full_rule_id = f"fortify:{rule_id}"
-
-        # Extract metadata from child elements
-        name = (
-            self._xml_text(rd, f"{ns}Name")
-            or self._xml_text(rd, "Name")
-            or self._xml_text(rd, f"{ns}Title")
-            or self._xml_text(rd, "Title")
-            or rule_id
-        )
-
-        description = (
-            self._xml_text(rd, f"{ns}Description")
-            or self._xml_text(rd, "Description")
-            or self._xml_text(rd, f"{ns}DescriptionBrief")
-            or self._xml_text(rd, "DescriptionBrief")
-            or ""
-        )
-
-        # Severity/Impact
-        severity_raw = (
-            self._xml_text(rd, f"{ns}Impact")
-            or self._xml_text(rd, "Impact")
-            or self._xml_text(rd, f"{ns}Severity")
-            or self._xml_text(rd, "Severity")
-            or "medium"
-        )
-        severity = SEVERITY_MAP.get(str(severity_raw).lower(), "medium")
-
-        # Category
-        fortify_category = (
-            self._xml_text(rd, f"{ns}Category")
-            or self._xml_text(rd, "Category")
-            or self._xml_text(rd, f"{ns}Subcategory")
-            or self._xml_text(rd, "Subcategory")
-            or ""
-        )
-        category = CATEGORY_MAP.get(
-            fortify_category.lower().strip(), "security"
-        )
-
-        # CWE
-        cwe_ids = []
-        cwe_raw = (
-            self._xml_text(rd, f"{ns}CWE")
-            or self._xml_text(rd, "CWE")
-            or self._xml_text(rd, f"{ns}CWEId")
-            or self._xml_text(rd, "CWEId")
-            or ""
-        )
-        if cwe_raw:
-            cwe_nums = re.findall(r"(\d+)", str(cwe_raw))
-            cwe_ids = [f"CWE-{n}" for n in cwe_nums]
-
-        language = (
-            self._xml_text(rd, f"{ns}Language")
-            or self._xml_text(rd, "Language")
-            or ""
-        )
-
-        tags = ["fortify", "sast", category]
-        if fortify_category:
-            tags.append(fortify_category.lower().replace(" ", "-"))
-
-        self.upsert(
-            rule_id=full_rule_id,
-            title=f"Fortify {name}"[:500],
-            description=description[:2000],
-            severity=severity,
-            category=category,
-            language=language,
-            cwe_ids=cwe_ids,
-            tags=tags,
-            source_file=fpath,
-            rule_content=ET.tostring(rd, encoding="unicode")[:50000] if rd else "",
-            rule_format="xml",
-            metadata={
-                "checker_id": rule_id,
-                "checker_name": name,
-                "fortify_category": fortify_category,
-                "impact": severity_raw,
-                "source": "rulepack-xml-import",
-            },
-        )
-        return 1
-
-    def _parse_fpr_audit(self, root, ns, fpath):
-        """Parse an FPR audit file, extracting unique rules from findings."""
-        count = 0
-        seen_rules = set()
-
-        # FPR findings are in <Issue> or <IssueInstance> elements
-        # Each has a ClassID/CategoryID that identifies the rule
-        for issue in root.iter():
-            tag_name = issue.tag.replace(ns, "") if ns else issue.tag
-            if tag_name not in ("Issue", "IssueInstance"):
-                continue
-
-            # Extract rule identifier
-            rule_id = (
-                issue.get("classId")
-                or issue.get("categoryId")
-                or issue.get("instanceId")
-                or ""
-            )
-            if not rule_id or rule_id in seen_rules:
-                continue
-            seen_rules.add(rule_id)
-
-            full_rule_id = f"fortify:{rule_id}"
-
-            # Extract category/severity from child elements
-            category_name = ""
-            severity_raw = "medium"
-            for child in issue:
-                child_tag = child.tag.replace(ns, "") if ns else child.tag
-                if child_tag in ("Category", "ClassID"):
-                    category_name = child.text or ""
-                elif child_tag in ("Impact", "Severity", "Friority"):
-                    severity_raw = child.text or "medium"
-
-            severity = SEVERITY_MAP.get(str(severity_raw).lower(), "medium")
-            category = CATEGORY_MAP.get(
-                category_name.lower().strip(), "security"
-            )
-
-            tags = ["fortify", "sast", category]
-            if category_name:
-                tags.append(category_name.lower().replace(" ", "-"))
-
-            self.upsert(
-                rule_id=full_rule_id,
-                title=f"Fortify {rule_id}: {category_name}"[:500],
-                description=f"Fortify rule {rule_id}. Category: {category_name}.",
-                severity=severity,
-                category=category,
-                language="",
-                cwe_ids=[],
-                tags=tags,
-                source_file=fpath,
-                rule_content="",
-                rule_format="xml",
-                metadata={
-                    "checker_id": rule_id,
-                    "fortify_category": category_name,
-                    "impact": severity_raw,
-                    "source": "fpr-audit-import",
-                },
-            )
-            count += 1
-
-        return count
-
-    def _parse_csv(self, fpath):
-        """Parse a CSV export of Fortify checker definitions."""
-        count = 0
-
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    checker_id = (
-                        row.get("CategoryID")
-                        or row.get("RuleID")
-                        or row.get("Checker")
-                        or row.get("checker")
-                        or row.get("rule_id")
-                        or ""
-                    )
-                    if not checker_id:
-                        continue
-
-                    full_rule_id = f"fortify:{checker_id}"
-
-                    title = (
-                        row.get("Category")
-                        or row.get("RuleName")
-                        or row.get("CheckerName")
-                        or row.get("Description")
-                        or checker_id
-                    )
-
-                    description = (
-                        row.get("Description")
-                        or row.get("Detail")
-                        or row.get("Abstract")
-                        or ""
-                    )
-
-                    severity_raw = (
-                        row.get("Impact")
-                        or row.get("Severity")
-                        or row.get("Friority")
-                        or row.get("Risk")
-                        or "medium"
-                    )
-                    severity = SEVERITY_MAP.get(str(severity_raw).lower(), "medium")
-
-                    cwe_ids = []
-                    cwe_raw = row.get("CWE") or row.get("CWEId") or ""
-                    if cwe_raw:
-                        cwe_nums = re.findall(r"(\d+)", str(cwe_raw))
-                        cwe_ids = [f"CWE-{n}" for n in cwe_nums]
-
-                    fortify_category = row.get("Category") or ""
-                    category = CATEGORY_MAP.get(
-                        fortify_category.lower().strip(), "security"
-                    )
-                    language = row.get("Language") or row.get("Analyzer") or ""
-
-                    tags = ["fortify", "sast", category]
-                    if fortify_category:
-                        tags.append(fortify_category.lower().replace(" ", "-"))
-
-                    self.upsert(
-                        rule_id=full_rule_id,
-                        title=f"Fortify {checker_id}: {title}"[:500],
-                        description=description[:2000],
-                        severity=severity,
-                        category=category,
-                        language=language,
-                        cwe_ids=cwe_ids,
-                        tags=tags,
-                        source_file=fpath,
-                        rule_content=json.dumps(row, default=str)[:50000],
-                        rule_format="csv",
-                        metadata={
-                            "checker_id": checker_id,
-                            "fortify_category": fortify_category,
-                            "impact": severity_raw,
-                            "source": "csv-import",
-                        },
-                    )
-                    count += 1
-        except Exception as e:
-            logger.warning(f"[fortify] Failed to parse CSV {fpath}: {e}")
-
-        return count
-
-    def _parse_xlsx(self, fpath):
-        """Parse an XLSX export of Fortify checker definitions.
-
-        Requires openpyxl. If not installed, logs a warning and skips.
-        """
-        try:
-            import openpyxl
-        except ImportError:
-            logger.warning(
-                "[fortify] openpyxl not installed — skipping XLSX file. "
-                "Install with: pip install openpyxl"
-            )
-            return 0
-
-        count = 0
-        try:
-            wb = openpyxl.load_workbook(fpath, read_only=True, data_only=True)
-            for sheet in wb.sheetnames:
-                ws = wb[sheet]
-                rows = list(ws.iter_rows(values_only=True))
-                if not rows:
-                    continue
-
-                headers = [str(h or "").strip().lower() for h in rows[0]]
-
-                for row in rows[1:]:
-                    row_dict = {
-                        headers[i]: (str(row[i]) if row[i] is not None else "")
-                        for i in range(min(len(headers), len(row)))
-                    }
-
-                    checker_id = (
-                        row_dict.get("categoryid")
-                        or row_dict.get("ruleid")
-                        or row_dict.get("checker")
-                        or ""
-                    )
-                    if not checker_id:
-                        continue
-
-                    full_rule_id = f"fortify:{checker_id}"
-
-                    title = (
-                        row_dict.get("category")
-                        or row_dict.get("rulename")
-                        or row_dict.get("description")
-                        or checker_id
-                    )
-
-                    description = (
-                        row_dict.get("description")
-                        or row_dict.get("detail")
-                        or row_dict.get("abstract")
-                        or ""
-                    )
-
-                    severity_raw = (
-                        row_dict.get("impact")
-                        or row_dict.get("severity")
-                        or row_dict.get("friority")
-                        or "medium"
-                    )
-                    severity = SEVERITY_MAP.get(str(severity_raw).lower(), "medium")
-
-                    cwe_ids = []
-                    cwe_raw = row_dict.get("cwe") or ""
-                    if cwe_raw:
-                        cwe_nums = re.findall(r"(\d+)", str(cwe_raw))
-                        cwe_ids = [f"CWE-{n}" for n in cwe_nums]
-
-                    fortify_category = row_dict.get("category") or ""
-                    category = CATEGORY_MAP.get(
-                        fortify_category.lower().strip(), "security"
-                    )
-
-                    tags = ["fortify", "sast", category]
-                    if fortify_category:
-                        tags.append(fortify_category.lower().replace(" ", "-"))
-
-                    self.upsert(
-                        rule_id=full_rule_id,
-                        title=f"Fortify {checker_id}: {title}"[:500],
-                        description=description[:2000],
-                        severity=severity,
-                        category=category,
-                        language=row_dict.get("language") or "",
-                        cwe_ids=cwe_ids,
-                        tags=tags,
-                        source_file=fpath,
-                        rule_content=json.dumps(row_dict, default=str)[:50000],
-                        rule_format="xlsx",
-                        metadata={
-                            "checker_id": checker_id,
-                            "fortify_category": fortify_category,
-                            "impact": severity_raw,
-                            "source": "xlsx-import",
-                        },
-                    )
+            for cell in cells:
+                rule = self._parse_weakness_cell(cell, kingdom)
+                if rule:
+                    self._register_rule(rule)
                     count += 1
 
-            wb.close()
-        except Exception as e:
-            logger.warning(f"[fortify] Failed to parse XLSX {fpath}: {e}")
+            page += 1
+            # Be polite
+            time.sleep(0.5)
 
+        logger.info(
+            f"[fortify] Kingdom '{kingdom}': registered {count} rules"
+        )
         return count
+
+    # ------------------------------------------------------------------
+    # Parsing helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _kingdom_url(kingdom, page=1):
+        """Build the URL for a kingdom listing page."""
+        encoded = urllib.parse.quote(kingdom)
+        if page <= 1:
+            return f"{BASE_URL}/weakness?kingdom={encoded}"
+        return f"{BASE_URL}/weakness?kingdom={encoded}&po={page}"
 
     @staticmethod
-    def _xml_text(element, tag):
-        """Safely extract text from a child element."""
-        child = element.find(tag)
-        if child is not None and child.text:
-            return child.text.strip()
-        return ""
+    def _get_max_page(soup):
+        """Extract the maximum page number from pagination links."""
+        max_page = 1
+        pag = soup.find("ul", class_=re.compile(r"pag", re.I))
+        if pag:
+            for link in pag.find_all("a", href=True):
+                m = re.search(r"po=(\d+)", link.get("href", ""))
+                if m:
+                    max_page = max(max_page, int(m.group(1)))
+        return max_page
+
+    @staticmethod
+    def _parse_weakness_cell(cell, kingdom):
+        """Parse a single weaknessCell div into a rule dict.
+
+        Returns None if the cell doesn't contain a valid weakness.
+        """
+        # Title
+        title_div = cell.find("div", class_="title")
+        if not title_div:
+            return None
+        title = title_div.get_text(strip=True)
+        if not title:
+            return None
+
+        # Languages from tab links
+        tab_links = cell.find_all("a", attrs={"data-toggle": "tab"})
+        languages = [t.get_text(strip=True) for t in tab_links if t.get_text(strip=True)]
+
+        # Abstract from the first (active) tab pane
+        abstract = ""
+        first_pane = (
+            cell.find("div", class_="tab-pane", attrs={"class": re.compile(r"active")})
+            or cell.find("div", class_="tab-pane")
+        )
+        if first_pane:
+            sub_title = first_pane.find("div", class_="sub-title")
+            if sub_title and "abstract" in sub_title.get_text(strip=True).lower():
+                ab_div = sub_title.find_next_sibling("div", class_="t")
+                if ab_div:
+                    abstract = ab_div.get_text(strip=True)
+
+        # External detail link (gives us category/subcategory)
+        detail_link = cell.find("a", class_="external-link")
+        detail_url = ""
+        category_name = ""
+        subcategory_name = ""
+        if detail_link:
+            detail_url = detail_link.get("href", "")
+            # Parse query params: /en/detail?category=X&subcategory=Y#lang
+            parsed = urllib.parse.urlparse(detail_url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            category_name = (qs.get("category", [""])[0])
+            subcategory_name = (qs.get("subcategory", [""])[0])
+
+        # data-id on the cell
+        data_id = cell.get("data-id", "")
+
+        # Build rule_id — slugified title
+        rule_id = f"fortify:{FortifyCollector._slugify(title)}"
+
+        return {
+            "rule_id": rule_id,
+            "title": title,
+            "abstract": abstract,
+            "kingdom": kingdom,
+            "languages": languages,
+            "detail_url": detail_url,
+            "category_name": category_name,
+            "subcategory_name": subcategory_name,
+            "data_id": data_id,
+        }
+
+    def _register_rule(self, rule):
+        """Upsert a parsed weakness into the database."""
+        kingdom = rule["kingdom"]
+        severity = KINGDOM_SEVERITY.get(kingdom, "medium")
+        category = KINGDOM_CATEGORY.get(kingdom, "security")
+        languages = rule["languages"]
+        language_str = ", ".join(languages) if languages else ""
+
+        # Build tags
+        tags = ["fortify", "sast", category, "vulncat"]
+        # Add kingdom slug as tag
+        kingdom_slug = kingdom.lower().replace(" ", "-").replace("&", "and")
+        tags.append(kingdom_slug)
+
+        # Build description
+        desc = rule["abstract"]
+        if not desc:
+            desc = f"Fortify {kingdom} weakness: {rule['title']}"
+
+        # Build metadata
+        metadata = {
+            "kingdom": kingdom,
+            "category": rule["category_name"],
+            "subcategory": rule["subcategory_name"],
+            "languages": languages,
+            "data_id": rule["data_id"],
+            "detail_url": rule["detail_url"],
+            "source": "vulncat.fortify.com",
+        }
+
+        self.upsert(
+            rule_id=rule["rule_id"],
+            title=rule["title"][:500],
+            description=desc[:5000],
+            severity=severity,
+            category=category,
+            language=language_str,
+            cwe_ids=[],
+            tags=tags,
+            source_file="",
+            rule_content="",
+            rule_format="html",
+            metadata=metadata,
+        )
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _slugify(text):
+        """Convert a title to a slug suitable for a rule ID."""
+        # Lowercase, replace non-alphanumeric with hyphens
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower())
+        slug = slug.strip("-")
+        return slug
