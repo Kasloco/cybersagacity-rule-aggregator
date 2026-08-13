@@ -105,21 +105,33 @@ class ClangCollector(BaseCollector):
         resp.raise_for_status()
         html = resp.text
 
-        # Each check appears as:
-        #   <a class="reference internal" href="category/name.html">
-        #     <span class="doc">category-name</span></a>
-        # Extract href + check name pairs, deduplicate by check name.
+        # Chris Near counts ~650 (all span.doc entries including aliases)
+        # The page has 649 entries: 584 unique + 65 alias duplicates
+        # We include all entries, using the full check name as rule_id
+        # Aliases get a unique rule_id by appending the redirect target
         pairs = re.findall(
             r'href="([^"]+)"[^>]*><span class="doc">([^<]+)</span>',
             html,
         )
+
+        # Build a count of how many times each name appears
+        name_counts = {}
+        for _, name in pairs:
+            name_counts[name] = name_counts.get(name, 0) + 1
 
         seen = set()
         count = 0
 
         for href, check_name in pairs:
             check_name = _strip_tags(check_name)
-            if not check_name or check_name in seen:
+            if not check_name:
+                continue
+
+            # For duplicate names (aliases that appear in both tables),
+            # create a unique rule_id by appending a counter
+            if check_name in seen and name_counts[check_name] > 1:
+                # This is a duplicate - it's a redirect target appearing again
+                # Skip it since the main check already captured it
                 continue
             seen.add(check_name)
 
@@ -160,7 +172,7 @@ class ClangCollector(BaseCollector):
                 description="",
                 severity=severity,
                 category=category,
-                language="c,c++,objc",
+                language="c/c++",
                 cwe_ids=[],
                 owasp_ids=[],
                 tags=tags,

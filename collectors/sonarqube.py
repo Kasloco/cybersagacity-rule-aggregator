@@ -212,11 +212,11 @@ class SonarQubeCollector(BaseCollector):
                 except (json.JSONDecodeError, IOError):
                     continue
 
-                # Find language-specific overrides
+                # Find language-specific overrides (exclude 'common' — not a language)
                 lang_dirs = [
                     d for d in os.listdir(rule_dir)
                     if os.path.isdir(os.path.join(rule_dir, d))
-                    and d not in ("metadata.json",)
+                    and d not in ("metadata.json", "common")
                 ]
 
                 if lang_dirs:
