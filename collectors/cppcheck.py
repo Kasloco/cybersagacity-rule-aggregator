@@ -10,14 +10,15 @@ logger = logging.getLogger(__name__)
 
 # CppCheck severity -> aggregator severity mapping
 SEVERITY_MAP = {
-    "error": "high",
-    "warning": "medium",
+    "error": "critical",
+    "warning": "high",
     "performance": "medium",
     "portability": "low",
     "style": "low",
-    "information": "low",
-    "debug": "low",
-    "internal": "low",
+    "information": "info",
+    "debug": "info",
+    "internal": "info",
+    "none": "info",
 }
 
 # Files in lib/ that contain reportError/reportInfo calls
@@ -35,7 +36,7 @@ CHECK_FILES = [
 
 SEVERITY_ORDER = [
     "error", "warning", "performance", "portability",
-    "style", "information", "debug", "internal",
+    "style", "information", "debug", "internal", "none", "unknown",
 ]
 
 
@@ -91,9 +92,9 @@ class CppCheckCollector(BaseCollector):
             i = 0
             while i < len(lines):
                 line = lines[i]
-                m = re.search(r"\breport(Error|Info)\s*\(", line)
+                m = re.search(r"\breport(Err|Error|Info)\s*\(", line)
                 if m:
-                    call_type = "reportError" if m.group(1) == "Error" else "reportInfo"
+                    call_type = "reportError" if m.group(1) in ("Error", "Err") else "reportInfo"
                     abs_pos = sum(len(lines[k]) + 1 for k in range(i)) + m.start()
                     match_len = m.end() - m.start()
                     pos = abs_pos + match_len
@@ -199,6 +200,18 @@ class CppCheckCollector(BaseCollector):
             id_match = re.search(r',\s*"([^"]+)"\.c_str\(\)', block)
         error_id = id_match.group(1) if id_match else None
         if not error_id:
+            # Try to resolve variable id (e.g., Severity::warning, id, ...)
+            error_id = self._resolve_variable_id(block, lines, line_idx)
+        if not error_id:
+            # Fallback: variable severity (e.g., reportError(tok, severity, "id", ...))
+            # Look for first camelCase quoted string (no spaces, starts lowercase)
+            for qm in re.finditer(r'"([a-z][a-zA-Z0-9_]+)"', block):
+                candidate = qm.group(1)
+                if len(candidate) > 3 and candidate not in ("msg", "errmsg", "errorPath"):
+                    error_id = candidate
+                    id_match = qm
+                    break
+        if not error_id:
             return None
 
         # CWE — numbered (CWE123) or named (CWE_BUFFER_OVERRUN)
@@ -237,7 +250,12 @@ class CppCheckCollector(BaseCollector):
 
     def _extract_message(self, block, id_match, lines, line_idx):
         """Extract the human-readable message from a reportError block."""
-        after_id = block[id_match.end():]
+        if id_match:
+            after_id = block[id_match.end():]
+        else:
+            # Variable id — skip past the variable name token
+            var_skip = re.search(r'Severity::\w+\s*,\s*\w+\s*,', block)
+            after_id = block[var_skip.end():] if var_skip else block
         # Split at CWE or Certainty to isolate the message argument
         msg_part = re.split(r",\s*CWE|,\s*Certainty", after_id)[0]
 
@@ -322,9 +340,78 @@ class CppCheckCollector(BaseCollector):
 
         return messages
 
-    # ------------------------------------------------------------------
-    # XML rule parsing (rules/ directory)
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_variable_id(block, lines, line_idx):
+        """Resolve a variable error ID from the block and surrounding context.
+
+        Handles patterns like:
+          - const char *id = "someId";
+          - constexpr char id[] = "someId";
+          - std::string id = "prefix" + (cond ? "A" : "B") + "suffix";
+          - id = cond ? "optionA" : "optionB";
+        Returns a single representative ID (first option) or None.
+        """
+        # Find the variable name used as the id argument
+        var_match = re.search(r'Severity::\w+\s*,\s*(\w+)[,\s)]', block)
+        if not var_match:
+            return None
+        varname = var_match.group(1)
+
+        # Search backwards for the variable definition
+        for j in range(line_idx - 1, max(0, line_idx - 40), -1):
+            sline = lines[j]
+
+            # Pattern: const char *id = "..."; or constexpr char id[] = "...";
+            const_match = re.search(
+                rf'(?:const\s+char\s*\*|constexpr\s+char)\s*{re.escape(varname)}\s*\[?\]?\s*=\s*"([^"]+)"',
+                sline,
+            )
+            if const_match:
+                return const_match.group(1)
+
+            # Pattern: std::string id = "..." + (cond ? "A" : "B") + ...
+            str_init_match = re.search(
+                rf'(?:const\s+)?std::string\s+{re.escape(varname)}\s*=\s*(.+)',
+                sline,
+            )
+            if str_init_match:
+                expr = str_init_match.group(1)
+                strings = re.findall(r'"([^"]*)"', expr)
+                ternary_options = re.findall(r'\?\s*"([^"]*)"\s*:\s*"([^"]*)"', expr)
+                if ternary_options:
+                    parts = [s for s in strings if s]
+                    for opt1, _ in ternary_options:
+                        if opt1:
+                            parts.append(opt1)
+                    return "".join(parts) if parts else None
+                elif strings:
+                    return "".join(s for s in strings if s) or None
+
+            # Pattern: id = cond ? "optionA" : "optionB";
+            ternary_match = re.search(
+                rf'{re.escape(varname)}\s*=\s*[^;]*\?\s*"([^"]+)"\s*:\s*"([^"]+)"',
+                sline,
+            )
+            if ternary_match:
+                return ternary_match.group(1)
+
+            # Pattern: const std::string id = "constant";
+            const_str_match = re.search(
+                rf'const\s+std::string\s+{re.escape(varname)}\s*=\s*"([^"]+)"',
+                sline,
+            )
+            if const_str_match:
+                return const_str_match.group(1)
+
+            # Pattern: id = "constant" + variable  (e.g. id = "shadow" + ShadowedType)
+            concat_match = re.search(
+                rf'{re.escape(varname)}\s*=\s*"([^"]+)"\s*\+',
+                sline,
+            )
+            if concat_match:
+                return concat_match.group(1)
+
+        return None
 
     def _parse_xml_rules(self, rules_dir):
         """Parse XML rule files in the rules/ directory."""
@@ -332,7 +419,7 @@ class CppCheckCollector(BaseCollector):
 
         count = 0
         for fname in sorted(os.listdir(rules_dir)):
-            if not fname.endswith(".xml"):
+            if not (fname.endswith(".xml") or fname.endswith(".rule")):
                 continue
             fpath = os.path.join(rules_dir, fname)
             rel_path = os.path.join("rules", fname)
@@ -352,7 +439,8 @@ class CppCheckCollector(BaseCollector):
 
             rule_id = id_el.text.strip() if id_el is not None and id_el.text else None
             if not rule_id:
-                continue
+                # Use filename as fallback ID (e.g., empty-catch-block.xml -> empty-catch-block)
+                rule_id = fname.rsplit(".", 1)[0]
 
             native_sev = sev_el.text.strip() if sev_el is not None and sev_el.text else "style"
             severity = SEVERITY_MAP.get(native_sev, "low")

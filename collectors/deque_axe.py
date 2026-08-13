@@ -38,13 +38,16 @@ class DequeAXECollector(BaseCollector):
 
         if os.path.isdir(rules_dir):
             for fname in os.listdir(rules_dir):
-                if not fname.endswith(".js") or fname.startswith("_"):
-                    continue
-                fpath = os.path.join(rules_dir, fname)
-                rel_path = os.path.relpath(fpath, self.clone_dir)
-                count += self._parse_rule_file(fpath, rel_path)
+                if fname.endswith(".json"):
+                    fpath = os.path.join(rules_dir, fname)
+                    rel_path = os.path.relpath(fpath, self.clone_dir)
+                    count += self._parse_json_rule(fpath, rel_path)
+                elif fname.endswith(".js") and not fname.startswith("_"):
+                    fpath = os.path.join(rules_dir, fname)
+                    rel_path = os.path.relpath(fpath, self.clone_dir)
+                    count += self._parse_rule_file(fpath, rel_path)
 
-        # Also check for JSON rule files in newer axe-core versions
+        # Also check for JSON rule files in subdirectory (older axe-core versions)
         json_rules_dir = os.path.join(self.clone_dir, "lib", "rules", "json")
         if os.path.isdir(json_rules_dir):
             for fname in os.listdir(json_rules_dir):

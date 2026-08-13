@@ -63,7 +63,10 @@ class CodeQLCollector(BaseCollector):
                 self.source_url, self.clone_dir,
             ], check=True)
             subprocess.run(["git", "-C", self.clone_dir, "sparse-checkout", "init", "--cone"], check=True)
-            subprocess.run(["git", "-C", self.clone_dir, "sparse-checkout", "set", "ql/src"], check=True)
+            subprocess.run(["git", "-C", self.clone_dir, "sparse-checkout", "set",
+                "cpp/ql/src", "csharp/ql/src", "go/ql/src", "java/ql/src",
+                "javascript/ql/src", "python/ql/src", "ruby/ql/src", "swift/ql/src",
+                "ql/src"], check=True)
             subprocess.run(["git", "-C", self.clone_dir, "checkout"], check=True)
         import git as gitpython
         return gitpython.Repo(self.clone_dir)
@@ -146,11 +149,18 @@ class CodeQLCollector(BaseCollector):
             cwe_ids.append(f"CWE-{cwe_match.group(1)}")
         cwe_str = ", ".join(cwe_ids) if cwe_ids else ""
 
+        # Extract language from the directory path (e.g. "cpp/ql/src/..." -> "cpp")
+        language = ""
+        path_parts = rel_path.replace("\\", "/").split("/")
+        if path_parts and path_parts[0] in ("cpp", "csharp", "go", "java", "javascript", "python", "ruby", "swift"):
+            language = path_parts[0]
+
         self.upsert(
             rule_id,
             title,
             severity=severity,
             cwe_ids=cwe_str,
+            language=language,
             description=description[:500] if description else None,
             metadata={
                 "kind": metadata.get("kind", ""),
