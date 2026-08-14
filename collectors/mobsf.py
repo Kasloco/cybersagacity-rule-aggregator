@@ -124,6 +124,7 @@ class MobSFCollector(BaseCollector):
                 f"mobsf-{rule_id}",
                 title,
                 severity=severity,
+                language="java",
                 cwe_ids=cwe,
                 description=" | ".join(parts)[:500],
             )
@@ -205,6 +206,7 @@ class MobSFCollector(BaseCollector):
                 rule_id,
                 description[:200],
                 severity=severity,
+                language="swift",
                 cwe_ids=cwe,
                 description=" | ".join(desc_parts)[:500],
             )

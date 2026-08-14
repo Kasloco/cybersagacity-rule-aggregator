@@ -101,6 +101,7 @@ class FindBugsCollector(BaseCollector):
                     rule_id,
                     title,
                     severity="medium",
+                    language="java",
                     description=f"FindBugs {category or ''} bug pattern: {title}",
                     metadata={
                         "abbrev": abbrev or "",
