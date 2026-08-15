@@ -77,7 +77,7 @@ class CheckmarxDASTCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[checkmarx_dast] Scrape failed: {e}, using curated list")
 
-        if count == 0:
+        if count < 10:
             for rule in CHECKMARX_DAST_RULES:
                 self.upsert(
                     rule_id=rule["id"],

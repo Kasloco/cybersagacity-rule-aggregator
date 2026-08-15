@@ -83,7 +83,7 @@ class TenableWASCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[tenable_was] Scrape failed: {e}, using curated list")
 
-        if count == 0:
+        if count < 10:
             for rule in TENABLE_WAS_RULES:
                 self.upsert(
                     rule_id=rule["id"],

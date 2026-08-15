@@ -76,7 +76,7 @@ class WallarmAPICollector(BaseCollector):
             logger.warning(f"[wallarm_api] Scrape failed: {e}, using curated list")
 
         # Fallback to curated list
-        if count == 0:
+        if count < 10:
             for attack in WALLARM_ATTACKS:
                 self.upsert(
                     rule_id=attack["id"],

@@ -68,7 +68,7 @@ class VeracodeDASTCollector(BaseCollector):
             logger.warning(f"[veracode_dast] DAST page failed: {e}")
 
         # Also scrape the shared CWE reference page for DAST-specific entries
-        if count == 0:
+        if count < 10:
             logger.info(f"[veracode_dast] Falling back to CWE reference page...")
             try:
                 count = self._scrape_page(VERACODE_CWE_URL, "DAST")
@@ -76,7 +76,7 @@ class VeracodeDASTCollector(BaseCollector):
                 logger.warning(f"[veracode_dast] CWE page failed: {e}")
 
         # If both fail, use the curated DAST categories
-        if count == 0:
+        if count < 10:
             logger.info(f"[veracode_dast] Using curated DAST categories as fallback")
             count = self._use_curated()
 

@@ -71,7 +71,7 @@ class ParasoftInsureCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[parasoft_insure] Scrape failed: {e}, using curated list")
 
-        if count == 0:
+        if count < 10:
             for err in INSURE_ERRORS:
                 self.upsert(
                     rule_id=err["id"],

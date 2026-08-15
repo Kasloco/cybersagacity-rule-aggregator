@@ -88,7 +88,7 @@ class KlocworkCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[klocwork] Java docs scrape failed: {e}")
 
-        if count == 0:
+        if count < 10:
             for checker in KLOCWORK_CHECKERS:
                 self.upsert(
                     rule_id=checker["id"],

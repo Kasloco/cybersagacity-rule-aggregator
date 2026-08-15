@@ -79,7 +79,7 @@ class StackHawkCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[stackhawk] Scrape failed: {e}, using curated list")
 
-        if count == 0:
+        if count < 10:
             for rule in STACKHAWK_RULES:
                 self.upsert(
                     rule_id=rule["id"],

@@ -98,7 +98,7 @@ class AdacoreCodepeerCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[adacore_codepeer] Scrape failed: {e}, using curated list")
 
-        if count == 0:
+        if count < 10:
             for checker in CODEPEER_CHECKERS:
                 self.upsert(
                     rule_id=checker["id"],

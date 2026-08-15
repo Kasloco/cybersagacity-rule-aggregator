@@ -70,7 +70,7 @@ class JFrogXrayCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"[jfrog_xray] Scrape failed: {e}, using curated list")
 
-        if count == 0:
+        if count < 10:
             for check in JFROG_CHECKS:
                 self.upsert(
                     rule_id=check["id"],
