@@ -59,6 +59,18 @@ from .findbugs import FindBugsCollector
 from .checkmarx_cxsast import CheckmarxCxSASTCollector
 from .gitlab_advanced_sast import GitLabAdvancedSASTCollector
 from .mend_sast import MendCollector
+from .npm_audit import NpmAuditCollector
+from .snyk_oss_sca import SnykOSSCollector
+from .veracode_dast import VeracodeDASTCollector
+from .wallarm_api import WallarmAPICollector
+from .tenable_was import TenableWASCollector
+from .stackhawk import StackHawkCollector
+from .jfrog_xray import JFrogXrayCollector
+from .parasoft_insure import ParasoftInsureCollector
+from .klocwork import KlocworkCollector
+from .adacore_codepeer import AdacoreCodepeerCollector
+from .checkmarx_dast import CheckmarxDASTCollector
+from .checkmarx_one_sast import CheckmarxOneCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -116,4 +128,16 @@ ALL_COLLECTORS = [
     CheckmarxCxSASTCollector,
     GitLabAdvancedSASTCollector,
     MendCollector,
+    NpmAuditCollector,
+    SnykOSSCollector,
+    VeracodeDASTCollector,
+    WallarmAPICollector,
+    TenableWASCollector,
+    StackHawkCollector,
+    JFrogXrayCollector,
+    ParasoftInsureCollector,
+    KlocworkCollector,
+    AdacoreCodepeerCollector,
+    CheckmarxDASTCollector,
+    CheckmarxOneCollector,
 ]
