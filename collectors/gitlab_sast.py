@@ -1,255 +1,135 @@
-"""Collector for GitLab SAST rules and security scanner configurations.
+"""Collector for GitLab SAST security scanner templates.
 
-GitLab SAST runs multiple analyzers (Semgrep, ESLint, Bandit, etc.) but also
-has its own security rules and vulnerability detection patterns documented
-in the GitLab project. This collector focuses on GitLab-specific security
-policies, custom rules, and the SAST scanner configurations that define
-which checks run for each language.
+GitLab SAST runs multiple analyzers (Semgrep, ESLint, Bandit, etc.) and
+provides CI/CD security templates for each scanner type. The templates
+live in the GitLab monolith repo at lib/gitlab/ci/templates/Security/.
+
+The GitLab monolith is too large to clone in CI (multi-GB), so this
+collector uses source_type='web' with a curated list of the known
+security templates, each with its source URL pointing to the exact
+file in the GitLab repo.
 """
 
-import os
-import json
-import yaml
 import logging
 
 from .base import BaseCollector
 
 logger = logging.getLogger(__name__)
 
+# Curated list of GitLab CI security templates.
+# Each entry maps to a template file in the GitLab monolith repo.
+# Source: https://gitlab.com/gitlab-org/gitlab/-/tree/master/lib/gitlab/ci/templates/Security
+GITLAB_SAST_TEMPLATES = [
+    {"id": "SAST", "file": "Security/SAST.gitlab-ci.yml", "category": "sast", "severity": "high",
+     "desc": "GitLab SAST (Static Application Security Testing) template. Runs multi-language static analysis using analyzers like Semgrep, ESLint, Bandit, and Gosec."},
+    {"id": "SAST-IaC", "file": "Jobs/SAST-IaC.gitlab-ci.yml", "category": "iac-sast", "severity": "high",
+     "desc": "GitLab SAST for Infrastructure-as-Code. Scans Terraform, Ansible, CloudFormation, and Kubernetes manifests for misconfigurations."},
+    {"id": "SAST-IaC.latest", "file": "Jobs/SAST-IaC.latest.gitlab-ci.yml", "category": "iac-sast", "severity": "high",
+     "desc": "Latest version of GitLab SAST IaC template."},
+    {"id": "Secret-Detection", "file": "Security/Secret-Detection.gitlab-ci.yml", "category": "secrets", "severity": "high",
+     "desc": "GitLab Secret Detection template. Scans repository for hardcoded secrets, API keys, tokens, and credentials using Gitleaks-based analyzer."},
+    {"id": "Dependency-Scanning", "file": "Security/Dependency-Scanning.gitlab-ci.yml", "category": "sca", "severity": "high",
+     "desc": "GitLab Dependency Scanning template. Software Composition Analysis for detecting vulnerable dependencies (Maven, NPM, pip, gem, etc.)."},
+    {"id": "Container-Scanning", "file": "Security/Container-Scanning.gitlab-ci.yml", "category": "container-security", "severity": "high",
+     "desc": "GitLab Container Scanning template. Scans Docker container images for known vulnerabilities using Trivy."},
+    {"id": "Container-Scanning.latest", "file": "Security/Container-Scanning.latest.gitlab-ci.yml", "category": "container-security", "severity": "high",
+     "desc": "Latest version of GitLab Container Scanning template."},
+    {"id": "Multi-Container-Scanning.latest", "file": "Security/Multi-Container-Scanning.latest.gitlab-ci.yml", "category": "container-security", "severity": "high",
+     "desc": "Multi-image container scanning template (legacy)."},
+    {"id": "DAST", "file": "Security/DAST.gitlab-ci.yml", "category": "dast", "severity": "high",
+     "desc": "GitLab DAST (Dynamic Application Security Testing) template. Scans running web applications for vulnerabilities like XSS, SQL injection, and CSRF."},
+    {"id": "DAST.latest", "file": "Security/DAST.latest.gitlab-ci.yml", "category": "dast", "severity": "high",
+     "desc": "Latest version of GitLab DAST template."},
+    {"id": "DAST-API", "file": "Security/DAST-API.gitlab-ci.yml", "category": "dast-api", "severity": "high",
+     "desc": "GitLab DAST API template. Dynamic security testing for REST, GraphQL, and SOAP APIs."},
+    {"id": "DAST-API.latest", "file": "Security/DAST-API.latest.gitlab-ci.yml", "category": "dast-api", "severity": "high",
+     "desc": "Latest version of GitLab DAST API template."},
+    {"id": "API-Security", "file": "Security/API-Security.gitlab-ci.yml", "category": "api-security", "severity": "high",
+     "desc": "GitLab API Security testing template. Fuzzes API endpoints for security issues."},
+    {"id": "API-Security.latest", "file": "Security/API-Security.latest.gitlab-ci.yml", "category": "api-security", "severity": "high",
+     "desc": "Latest version of GitLab API Security template."},
+    {"id": "API-Fuzzing", "file": "Security/API-Fuzzing.gitlab-ci.yml", "category": "api-fuzzing", "severity": "medium",
+     "desc": "GitLab API Fuzzing template (legacy name for API Security)."},
+    {"id": "API-Fuzzing.latest", "file": "Security/API-Fuzzing.latest.gitlab-ci.yml", "category": "api-fuzzing", "severity": "medium",
+     "desc": "Latest version of GitLab API Fuzzing template (legacy name)."},
+    {"id": "API-Discovery", "file": "Security/API-Discovery.gitlab-ci.yml", "category": "api-discovery", "severity": "info",
+     "desc": "GitLab API Discovery template. Discovers API endpoints from web application traffic for subsequent security testing."},
+    {"id": "Coverage-Fuzzing", "file": "Security/Coverage-Fuzzing.gitlab-ci.yml", "category": "fuzzing", "severity": "medium",
+     "desc": "GitLab Coverage Fuzzing template. Coverage-guided fuzz testing for detecting crashes and memory safety issues."},
+    {"id": "Coverage-Fuzzing.latest", "file": "Security/Coverage-Fuzzing.latest.gitlab-ci.yml", "category": "fuzzing", "severity": "medium",
+     "desc": "Latest version of GitLab Coverage Fuzzing template."},
+    {"id": "BAS.latest", "file": "Security/BAS.latest.gitlab-ci.yml", "category": "breach-simulation", "severity": "high",
+     "desc": "GitLab Breach and Attack Simulation template. Runs simulated attacks to validate security controls."},
+    {"id": "DAST-On-Demand-Scan", "file": "Security/DAST-On-Demand-Scan.gitlab-ci.yml", "category": "dast", "severity": "high",
+     "desc": "GitLab DAST On-Demand Scan template. Allows running DAST scans without a pipeline."},
+    {"id": "DAST-On-Demand-API-Scan", "file": "Security/DAST-On-Demand-API-Scan.gitlab-ci.yml", "category": "dast-api", "severity": "high",
+     "desc": "GitLab DAST On-Demand API Scan template. On-demand API security testing without a pipeline."},
+    {"id": "DAST-Runner-Validation", "file": "Security/DAST-Runner-Validation.gitlab-ci.yml", "category": "dast", "severity": "info",
+     "desc": "GitLab DAST Runner Validation template. Validates DAST runner configuration."},
+    {"id": "Fortify-FoD-sast", "file": "Security/Fortify-FoD-sast.gitlab-ci.yml", "category": "sast", "severity": "high",
+     "desc": "GitLab template for integrating Fortify on Demand SAST scans into CI/CD pipelines."},
+    {"id": "Qualys-IaC-Security", "file": "Qualys-IaC-Security.gitlab-ci.yml", "category": "iac-security", "severity": "high",
+     "desc": "GitLab template for Qualys IaC Security scanning. Scans infrastructure-as-code for misconfigurations."},
+    {"id": "Secure-Binaries", "file": "Security/Secure-Binaries.gitlab-ci.yml", "category": "binary-security", "severity": "medium",
+     "desc": "GitLab Secure Binaries template. Scans compiled binaries for known vulnerabilities."},
+]
+
 
 class GitLabSASTCollector(BaseCollector):
     name = "gitlab_sast"
     display_name = "GitLab SAST"
-    source_type = "github"
-    source_url = "https://gitlab.com/gitlab-org/gitlab.git"
+    source_type = "web"
+    source_url = "https://gitlab.com/gitlab-org/gitlab/-/tree/master/lib/gitlab/ci/templates/Security"
     description = (
         "GitLab SAST (Static Application Security Testing). "
-        "Multi-language security scanning with custom rule sets for "
-        "injection, XSS, SSRF, path traversal, and OWASP Top 10 categories. "
-        "Integrates with GitLab CI/CD pipelines."
+        "Multi-language security scanning with CI/CD templates for SAST, "
+        "DAST, secret detection, dependency scanning, container scanning, "
+        "API security, and fuzzing. Integrates with GitLab CI/CD pipelines."
     )
     logo_url = "https://avatars.githubusercontent.com/u/10669714"
 
-    # GitLab uses gitlab.com not github.com, so we need to handle this
-    # The GitPython library can clone from gitlab.com
+    def clone_or_pull(self):  # type: ignore[override]
+        """No-op — curated list, no git clone needed."""
+        logger.info(f"[{self.name}] Web source — no clone/pull needed.")
+        return None
+
+    def has_changes(self):
+        return True
+
+    def save_commit_sha(self):
+        """No commit SHA for web sources."""
+        pass
 
     def collect_rules(self):
         count = 0
+        for tmpl in GITLAB_SAST_TEMPLATES:
+            rule_id = f"gitlab-sast:{tmpl['id']}"
+            source_file = f"lib/gitlab/ci/templates/{tmpl['file']}"
+            # Direct link to the file in GitLab
+            file_url = (
+                f"https://gitlab.com/gitlab-org/gitlab/-/raw/master/"
+                f"lib/gitlab/ci/templates/{tmpl['file']}"
+            )
 
-        # GitLab's security rules are in lib/gitlab/ci/templates/Security/
-        # and in the gitlab-sast related repos
-        # Look for SAST template files and security rule definitions
+            self.upsert(
+                rule_id=rule_id,
+                title=f"GitLab SAST: {tmpl['id']}",
+                description=tmpl["desc"],
+                severity=tmpl["severity"],
+                category=tmpl["category"],
+                language="yaml",
+                cwe_ids=[],
+                owasp_ids=[],
+                tags=["gitlab", "sast", "ci-cd", "security", tmpl["category"]],
+                source_file=file_url,
+                rule_content="",
+                rule_format="yaml",
+                metadata={
+                    "template": tmpl["id"],
+                    "template_file": source_file,
+                    "source": "gitlab-curated",
+                },
+            )
+            count += 1
 
-        # Primary location: lib/gitlab/ci/templates/Security/SAST.gitlab-ci.yml
-        templates_dir = os.path.join(
-            self.clone_dir, "lib", "gitlab", "ci", "templates"
-        )
-
-        if os.path.isdir(templates_dir):
-            for root, dirs, files in os.walk(templates_dir):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for fname in files:
-                    if fname.endswith((".yml", ".yaml")):
-                        fpath = os.path.join(root, fname)
-                        rel_path = os.path.relpath(fpath, self.clone_dir)
-                        count += self._parse_template(fpath, rel_path)
-
-        # Also look for security rule definitions in qa/ and spec/
-        security_dirs = [
-            os.path.join(self.clone_dir, "qa", "qa", "ee", "fixtures"),
-            os.path.join(self.clone_dir, "ee", "lib", "gitlab", "ci", "templates"),
-        ]
-
-        for sdir in security_dirs:
-            if os.path.isdir(sdir):
-                for root, dirs, files in os.walk(sdir):
-                    dirs[:] = [d for d in dirs if not d.startswith(".")]
-                    for fname in files:
-                        if fname.endswith((".yml", ".yaml", ".json")):
-                            fpath = os.path.join(root, fname)
-                            rel_path = os.path.relpath(fpath, self.clone_dir)
-                            count += self._parse_security_config(fpath, rel_path)
-
-        # Look for vulnerability rule definitions
-        # GitLab maintains vulnerability databases in lib/gitlab/vulnerabilities/
-        vuln_dir = os.path.join(self.clone_dir, "lib", "gitlab", "vulnerabilities")
-        if os.path.isdir(vuln_dir):
-            for root, dirs, files in os.walk(vuln_dir):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for fname in files:
-                    if fname.endswith(".rb"):
-                        fpath = os.path.join(root, fname)
-                        rel_path = os.path.relpath(fpath, self.clone_dir)
-                        count += self._parse_vulnerability_rb(fpath, rel_path)
-
-        logger.info(f"[gitlab_sast] Processed {count} rules")
-
-    def _parse_template(self, fpath, rel_path):
-        """Parse a GitLab CI SAST template for security scanner configs."""
-        count = 0
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            return 0
-
-        fname = os.path.basename(fpath)
-
-        # Only process SAST-related templates
-        if "sast" not in fname.lower() and "security" not in rel_path.lower():
-            return 0
-
-        try:
-            data = yaml.safe_load(content)
-        except yaml.YAMLError:
-            # Not valid YAML, skip
-            return 0
-
-        if not isinstance(data, dict):
-            return 0
-
-        # Extract scanner configurations
-        # GitLab SAST templates define variables and analyzer configs
-        scanner_name = fname.replace(".gitlab-ci.yml", "").replace(".yml", "")
-
-        rule_id = f"gitlab-sast:{scanner_name}"
-
-        # Extract relevant variables
-        variables = data.get("variables", {})
-        sast_variables = {
-            k: v for k, v in variables.items()
-            if "SAST" in k or "SECURE" in k or "SCAN" in k
-        }
-
-        description = f"GitLab SAST template for {scanner_name}"
-        if sast_variables:
-            description += f". Variables: {json.dumps(sast_variables)[:500]}"
-
-        self.upsert(
-            rule_id=rule_id,
-            title=f"GitLab SAST: {scanner_name}",
-            description=description,
-            severity="medium",
-            category="sast-config",
-            language="yaml",
-            cwe_ids=[],
-            tags=["gitlab", "sast", "ci-cd", "security"],
-            source_file=rel_path,
-            rule_content=content[:50000],
-            rule_format="yaml",
-            metadata={
-                "scanner": scanner_name,
-                "variables": sast_variables,
-                "template_type": "ci-config",
-            },
-        )
-        count += 1
-        return count
-
-    def _parse_security_config(self, fpath, rel_path):
-        """Parse security configuration files from GitLab's test/spec fixtures."""
-        count = 0
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            return 0
-
-        fname = os.path.basename(fpath)
-
-        # Only process files with security-relevant content
-        if not any(kw in fname.lower() for kw in
-                       ["vulnerability", "sast", "security", "finding"]):
-            return 0
-
-        # Try to parse as JSON (vulnerability definitions)
-        if fname.endswith(".json"):
-            try:
-                data = json.loads(content)
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and "id" in item:
-                            vuln_id = item.get("id", "")
-                            if not vuln_id:
-                                continue
-
-                            severity_map = {
-                                "critical": "critical",
-                                "high": "high",
-                                "medium": "medium",
-                                "low": "low",
-                                "info": "info",
-                            }
-                            severity = severity_map.get(
-                                item.get("severity", "").lower(), "medium"
-                            )
-
-                            self.upsert(
-                                rule_id=f"gitlab-sast:vuln-{vuln_id}",
-                                title=item.get("name", vuln_id)[:500],
-                                description=item.get("description", ""),
-                                severity=severity,
-                                category=item.get("category", "vulnerability"),
-                                language=item.get("language", ""),
-                                cwe_ids=[],
-                                tags=["gitlab", "sast", "vulnerability"],
-                                source_file=rel_path,
-                                rule_content=json.dumps(item, indent=2)[:50000],
-                                rule_format="json",
-                                metadata={
-                                    "vuln_id": vuln_id,
-                                    "scanner": item.get("scanner", ""),
-                                    "confidence": item.get("confidence", ""),
-                                },
-                            )
-                            count += 1
-            except json.JSONDecodeError:
-                pass
-
-        return count
-
-    def _parse_vulnerability_rb(self, fpath, rel_path):
-        """Parse Ruby vulnerability definition files."""
-        count = 0
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            return 0
-
-        import re
-
-        # Look for vulnerability class definitions
-        # Pattern: class X < Y; title "..."
-        class_match = re.search(r"class\s+(\w+)", content)
-        title_match = re.search(
-            r'(?:title|name)\s+["\']([^"\']+)["\']', content
-        )
-
-        if not class_match:
-            return 0
-
-        class_name = class_match.group(1)
-        title = title_match.group(1) if title_match else class_name
-
-        rule_id = f"gitlab-sast:{class_name}"
-
-        self.upsert(
-            rule_id=rule_id,
-            title=title[:500],
-            description=f"GitLab vulnerability class: {class_name}",
-            severity="medium",
-            category="vulnerability",
-            language="ruby",
-            cwe_ids=[],
-            tags=["gitlab", "sast", "vulnerability", "ruby"],
-            source_file=rel_path,
-            rule_content=content[:50000],
-            rule_format="ruby",
-            metadata={
-                "class_name": class_name,
-                "type": "vulnerability-class",
-            },
-        )
-        count += 1
-        return count
+        logger.info(f"[gitlab_sast] Processed {count} rules from curated templates")
