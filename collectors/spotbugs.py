@@ -159,16 +159,36 @@ class SpotBugsCollector(BaseCollector):
 
         return count
 
-    def _fetch_cwe_mappings(self):
-        """Fetch CWE mappings from the SpotBugs documentation page.
+    # Path to the committed CWE cache file (relative to this module).
+    _CWE_CACHE_PATH = os.path.join(
+        os.path.dirname(__file__), "cwe_cache", "spotbugs_cwe_map.json"
+    )
 
-        The docs page (bugDescriptions.html) contains per-bug-pattern
-        headings with CWE reference links in the description paragraphs.
-        We parse the HTML to build a ``{bug_type: [CWE-xxx, ...]}`` map.
+    def _fetch_cwe_mappings(self, force_refresh=False):
+        """Return a ``{bug_type: [CWE-xxx, ...]}`` map.
 
-        Returns an empty dict if the page cannot be fetched (the collector
-        still works, just without CWE enrichment).
+        Loads from a committed cache file first (fast, no network). If
+        the cache is missing or *force_refresh* is True, falls back to
+        scraping the SpotBugs docs page. When scraping succeeds, the
+        result is written back to the cache file so subsequent syncs
+        stay fast.
         """
+        if not force_refresh and os.path.exists(self._CWE_CACHE_PATH):
+            try:
+                with open(self._CWE_CACHE_PATH) as f:
+                    cwe_map = json.load(f)
+                logger.info(
+                    f"[spotbugs] Loaded {len(cwe_map)} CWE mappings "
+                    f"from cache ({self._CWE_CACHE_PATH})"
+                )
+                return cwe_map
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(
+                    f"[spotbugs] Cache file unreadable ({e}), "
+                    f"falling back to scrape"
+                )
+
+        # --- scrape fallback ---
         cwe_map = {}
         try:
             req = urllib.request.Request(
@@ -179,11 +199,8 @@ class SpotBugsCollector(BaseCollector):
                 html = resp.read().decode("utf-8", errors="replace")
 
             # Split on heading tags to isolate each bug pattern section.
-            # Headings look like: <h3>..(BUG_TYPE)<span class="headerlink"...
-            # or <h3 id="...">..(BUG_TYPE)<a class="headerlink"...
             sections = re.split(r"<h3[^>]*>", html)
             for section in sections[1:]:  # skip content before first h3
-                # Extract the bug type from the heading text
                 heading_end = section.find("</h3>")
                 if heading_end == -1:
                     continue
@@ -193,10 +210,7 @@ class SpotBugsCollector(BaseCollector):
                     continue
                 bug_type = type_match.group(1)
 
-                # Collect CWE IDs from <a> hrefs and plain text in the
-                # body of this section (everything until the next <h3>).
                 body = section[heading_end:]
-                # Stop at the next <h2> or <h3> (category boundary)
                 for stop_tag in ("<h2", "<h3"):
                     stop = body.find(stop_tag)
                     if stop != -1:
@@ -212,9 +226,19 @@ class SpotBugsCollector(BaseCollector):
                     cwe_map[bug_type] = sorted(cwes)
 
             logger.info(
-                f"[spotbugs] Fetched CWE mappings for {len(cwe_map)} "
+                f"[spotbugs] Scraped CWE mappings for {len(cwe_map)} "
                 f"of {len(sections)-1} bug patterns from docs"
             )
+
+            # Persist to cache so future syncs don't hit the network.
+            if cwe_map:
+                os.makedirs(os.path.dirname(self._CWE_CACHE_PATH), exist_ok=True)
+                with open(self._CWE_CACHE_PATH, "w") as f:
+                    json.dump(cwe_map, f, indent=2, sort_keys=True)
+                logger.info(
+                    f"[spotbugs] Cached CWE mappings to "
+                    f"{self._CWE_CACHE_PATH}"
+                )
         except Exception as e:
             logger.warning(f"[spotbugs] Could not fetch CWE mappings: {e}")
 
