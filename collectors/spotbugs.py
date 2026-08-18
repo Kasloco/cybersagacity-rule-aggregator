@@ -1,12 +1,21 @@
 """Collector for SpotBugs (FindBugs successor) rules."""
 
 import os
+import re
+import json
+import urllib.request
 import xml.etree.ElementTree as ET
 import logging
 
 from .base import BaseCollector
 
 logger = logging.getLogger(__name__)
+
+# URL for the SpotBugs documentation page that contains CWE mappings.
+SPOTBUGS_DOCS_URL = "https://spotbugs.readthedocs.io/en/latest/bugDescriptions.html"
+# Regex to extract CWE IDs from link hrefs and plain text.
+_CWE_HREF_RE = re.compile(r"cwe\.mitre\.org.*?/(\d+)\.html")
+_CWE_TEXT_RE = re.compile(r"CWE-(\d+)")
 
 
 class SpotBugsCollector(BaseCollector):
@@ -48,6 +57,9 @@ class SpotBugsCollector(BaseCollector):
 
     def collect_rules(self):
         count = 0
+        # Fetch CWE mappings from the SpotBugs documentation page.
+        cwe_map = self._fetch_cwe_mappings()
+
         # SpotBugs defines patterns in etc/findbugs.xml and messages.xml files
         # scattered across the repository (e.g. spotbugs/src/main/resources,
         # eclipse-plugin, etc.).
@@ -64,11 +76,11 @@ class SpotBugsCollector(BaseCollector):
                     # messages*.xml contains BugPattern elements with
                     # ShortDescription, Details, and LongDescription.
                     if fname.startswith("messages") and fname.endswith(".xml"):
-                        count += self._parse_messages_xml(fpath)
+                        count += self._parse_messages_xml(fpath, cwe_map)
 
         logger.info(f"[spotbugs] Processed {count} bug patterns")
 
-    def _parse_messages_xml(self, fpath):
+    def _parse_messages_xml(self, fpath, cwe_map=None):
         """Parse messages*.xml which contains bug pattern descriptions."""
         count = 0
         rel_path = os.path.relpath(fpath, self.clone_dir)
@@ -126,6 +138,9 @@ class SpotBugsCollector(BaseCollector):
             if long_desc_el is not None and long_desc_el.text:
                 metadata["long_description"] = long_desc_el.text.strip()[:500]
 
+            # Look up CWE mappings from the documentation page.
+            cwe_ids = (cwe_map or {}).get(bug_type, [])
+
             self.upsert(
                 rule_id=bug_type,
                 title=title[:500],
@@ -133,7 +148,7 @@ class SpotBugsCollector(BaseCollector):
                 severity=severity,
                 category=category,
                 language="java",
-                cwe_ids=[],
+                cwe_ids=cwe_ids,
                 tags=["spotbugs", "java", "sast", category.lower()],
                 source_file=rel_path,
                 rule_content=ET.tostring(pattern, encoding="unicode")[:50000],
@@ -143,6 +158,67 @@ class SpotBugsCollector(BaseCollector):
             count += 1
 
         return count
+
+    def _fetch_cwe_mappings(self):
+        """Fetch CWE mappings from the SpotBugs documentation page.
+
+        The docs page (bugDescriptions.html) contains per-bug-pattern
+        headings with CWE reference links in the description paragraphs.
+        We parse the HTML to build a ``{bug_type: [CWE-xxx, ...]}`` map.
+
+        Returns an empty dict if the page cannot be fetched (the collector
+        still works, just without CWE enrichment).
+        """
+        cwe_map = {}
+        try:
+            req = urllib.request.Request(
+                SPOTBUGS_DOCS_URL,
+                headers={"User-Agent": "CyberSagacity-RuleAggregator/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                html = resp.read().decode("utf-8", errors="replace")
+
+            # Split on heading tags to isolate each bug pattern section.
+            # Headings look like: <h3>..(BUG_TYPE)<span class="headerlink"...
+            # or <h3 id="...">..(BUG_TYPE)<a class="headerlink"...
+            sections = re.split(r"<h3[^>]*>", html)
+            for section in sections[1:]:  # skip content before first h3
+                # Extract the bug type from the heading text
+                heading_end = section.find("</h3>")
+                if heading_end == -1:
+                    continue
+                heading_text = section[:heading_end]
+                type_match = re.search(r"\(([A-Z][A-Z_]+)\)", heading_text)
+                if not type_match:
+                    continue
+                bug_type = type_match.group(1)
+
+                # Collect CWE IDs from <a> hrefs and plain text in the
+                # body of this section (everything until the next <h3>).
+                body = section[heading_end:]
+                # Stop at the next <h2> or <h3> (category boundary)
+                for stop_tag in ("<h2", "<h3"):
+                    stop = body.find(stop_tag)
+                    if stop != -1:
+                        body = body[:stop]
+
+                cwes = set()
+                for m in _CWE_HREF_RE.finditer(body):
+                    cwes.add("CWE-" + m.group(1))
+                for m in _CWE_TEXT_RE.finditer(body):
+                    cwes.add("CWE-" + m.group(1))
+
+                if cwes:
+                    cwe_map[bug_type] = sorted(cwes)
+
+            logger.info(
+                f"[spotbugs] Fetched CWE mappings for {len(cwe_map)} "
+                f"of {len(sections)-1} bug patterns from docs"
+            )
+        except Exception as e:
+            logger.warning(f"[spotbugs] Could not fetch CWE mappings: {e}")
+
+        return cwe_map
 
     def _load_category_map(self, messages_fpath):
         """Load a type→category mapping from the nearest findbugs.xml.
