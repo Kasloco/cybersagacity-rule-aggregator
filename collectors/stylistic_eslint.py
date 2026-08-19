@@ -25,7 +25,7 @@ SEVERITY_MAP = {
 
 class StylisticESLintCollector(BaseCollector):
     name = "stylistic-eslint"
-    display_name = "@stylistic/eslint-plugin"
+    display_name = "ESLint @stylistic"
     source_type = "github"
     source_url = "https://github.com/eslint-stylistic/eslint-stylistic.git"
     description = (

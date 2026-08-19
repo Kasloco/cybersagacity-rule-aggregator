@@ -36,7 +36,7 @@ COMPILER_SEVERITY_MAP = {
 
 class ReactHooksESLintCollector(BaseCollector):
     name = "react-hooks-eslint"
-    display_name = "eslint-plugin-react-hooks"
+    display_name = "ESLint React Hooks"
     source_type = "github"
     source_url = "https://github.com/facebook/react.git"
     description = (
