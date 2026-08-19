@@ -34,7 +34,7 @@ MAX_ADVISORIES = 5000
 
 class NpmAuditCollector(BaseCollector):
     name = "npm_audit"
-    display_name = "npm Audit (GitHub Advisory Database)"
+    display_name = "NPM Audit (GitHub Advisory Database)"
     source_type = "github"
     source_url = ADVISORY_REPO
     description = (

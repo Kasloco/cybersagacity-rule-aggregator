@@ -31,7 +31,7 @@ SEVERITY_MAP = {
 
 class NodejsscanCollector(BaseCollector):
     name = "nodejsscan"
-    display_name = "nodejsscan"
+    display_name = "NodeJSScan"
     source_type = "github"
     source_url = "https://github.com/ajinabraham/nodejsscan.git"
     description = (

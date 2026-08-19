@@ -24,7 +24,7 @@ SEVERITY_MAP = {
 
 class NjsscanCollector(BaseCollector):
     name = "njsscan"
-    display_name = "njsscan"
+    display_name = "NJSScan"
     source_type = "github"
     source_url = "https://github.com/ajinabraham/njsscan.git"
     description = (

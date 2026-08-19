@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class DlintCollector(BaseCollector):
     name = "dlint"
-    display_name = "dlint"
+    display_name = "Dlint"
     source_type = "github"
     source_url = "https://github.com/dlint-py/dlint.git"
     description = (
