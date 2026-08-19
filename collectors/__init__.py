@@ -71,6 +71,9 @@ from .klocwork import KlocworkCollector
 from .adacore_codepeer import AdacoreCodepeerCollector
 from .checkmarx_dast import CheckmarxDASTCollector
 from .checkmarx_one_sast import CheckmarxOneCollector
+from .typescript_eslint import TypeScriptESLintCollector
+from .stylistic_eslint import StylisticESLintCollector
+from .eslint_react import ESLintReactCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -140,4 +143,7 @@ ALL_COLLECTORS = [
     AdacoreCodepeerCollector,
     CheckmarxDASTCollector,
     CheckmarxOneCollector,
+    TypeScriptESLintCollector,
+    StylisticESLintCollector,
+    ESLintReactCollector,
 ]
