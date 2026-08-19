@@ -74,6 +74,7 @@ from .checkmarx_one_sast import CheckmarxOneCollector
 from .typescript_eslint import TypeScriptESLintCollector
 from .stylistic_eslint import StylisticESLintCollector
 from .eslint_react import ESLintReactCollector
+from .react_hooks_eslint import ReactHooksESLintCollector
 
 ALL_COLLECTORS = [
     SemgrepCollector,
@@ -146,4 +147,5 @@ ALL_COLLECTORS = [
     TypeScriptESLintCollector,
     StylisticESLintCollector,
     ESLintReactCollector,
+    ReactHooksESLintCollector,
 ]
