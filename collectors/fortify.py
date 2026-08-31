@@ -71,9 +71,11 @@ class FortifyCollector(BaseCollector):
     source_url = "https://vulncat.fortify.com/en"
     # Web scrape of a paginated, rate-limited site. True catalog ~1,691
     # (polite census 2026-08-31); biggest throttled run observed = 836.
-    # Floor must sit ABOVE any plausible throttled yield or a rate-limited
-    # fragment gets mistaken for truth. 1,200 = ~71% of live truth.
-    min_rules_floor = 1200
+    # Floor must be ABOVE the biggest throttled fragment (836) yet BELOW
+    # the deployed baseline (1,017) so the guard can actually fire while
+    # the DB holds the restored set: current_active(1017) >= 900, and a
+    # throttled 837-836-style run (< 900) gets blocked instead of trusted.
+    min_rules_floor = 900
     description = (
         "OpenText Fortify Taxonomy of Software Security Errors — a public "
         "catalog of security vulnerability categories organized into 8 "
