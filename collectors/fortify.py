@@ -156,28 +156,46 @@ class FortifyCollector(BaseCollector):
         """
         count = 0
         page = 1
-        max_page = 1
+        max_page = 1  # refined from pagination links on page 1
 
-        while page <= max_page:
+        # Keep fetching while pages return full content. _get_max_page is a
+        # hint, not ground truth: if the site's pagination links under-count
+        # (the 2026-08-30 collapse signature — exactly 4 pages x 20 rules
+        # scraped before stopping), continue past it until a page returns
+        # fewer than a full page of weakness cells, or the hard cap hits.
+        while True:
             url = self._kingdom_url(kingdom, page)
-            logger.info(
-                f"[fortify] Fetching kingdom='{kingdom}' page={page}/{max_page}"
-            )
 
-            try:
-                resp = session.get(url, timeout=60)
-                resp.raise_for_status()
-            except Exception as e:
-                logger.warning(f"[fortify] Failed to fetch {url}: {e}")
+            resp = None
+            for attempt in range(3):
+                try:
+                    logger.info(
+                        f"[fortify] Fetching kingdom='{kingdom}' page={page}"
+                        f"{f'/{max_page}' if max_page > 1 else ''}"
+                    )
+                    resp = session.get(url, timeout=90)
+                    resp.raise_for_status()
+                    break
+                except Exception as e:
+                    logger.warning(
+                        f"[fortify] Fetch {url} failed "
+                        f"({attempt + 1}/3): {e}"
+                    )
+                    time.sleep(2 * (attempt + 1))
+            if resp is None:
+                logger.warning(
+                    f"[fortify] Kingdom '{kingdom}' page {page}: giving up "
+                    f"after 3 attempts. Rules scraped so far: {count}."
+                )
                 break
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
             # Determine max_page from pagination on the first page
             if page == 1:
-                max_page = self._get_max_page(soup)
+                max_page = max(1, self._get_max_page(soup))
                 logger.info(
-                    f"[fortify] Kingdom '{kingdom}' has {max_page} pages"
+                    f"[fortify] Kingdom '{kingdom}' reports {max_page} pages"
                 )
 
             # Parse weakness cells on this page
@@ -194,9 +212,20 @@ class FortifyCollector(BaseCollector):
                     self._register_rule(rule)
                     count += 1
 
+            # End of kingdom: page returned fewer cells than a full page, or
+            # hard cap reached. If the site claims more pages but keeps
+            # returning full pages, keep going (under-count protection).
+            if len(cells) < 20 or page >= 200:
+                break
             page += 1
             # Be polite
             time.sleep(0.5)
+
+        if 0 < count < 20:
+            logger.error(
+                f"[fortify] Kingdom '{kingdom}' yielded only {count} rules — "
+                f"possible pagination or layout break; investigate."
+            )
 
         logger.info(
             f"[fortify] Kingdom '{kingdom}': registered {count} rules"

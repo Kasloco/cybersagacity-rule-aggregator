@@ -22,6 +22,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Checkout deploy repo (previous DB for seeding)
+        uses: actions/checkout@v4
+        with:
+          repository: Kasloco/cybersagacity-deploy
+          token: ${{ secrets.DEPLOY_REPO_TOKEN }}
+          path: deploy-repo
+
+      - name: Seed ingest DB from previous deploy DB
+        run: |
+          # Clean-room without a seed: deactivation runs against an empty DB,
+          # so any collector that returns a weak scrape (site relayout, bot
+          # block, timeouts — fortify lost 937 rules this way on 2026-08-30)
+          # silently ships a degraded vendor set. Seeding the ingest DB with
+          # the previously deployed DB means deactivation only removes rules
+          # genuinely absent from the new scrape, and the BaseCollector
+          # weak-yield guard (min_rules_floor) can actually fire.
+          if [ -f deploy-repo/data/rules.db ]; then
+            cp deploy-repo/data/rules.db rules.db
+            echo "Seeded ingest DB from previous deploy DB ($(du -h rules.db | cut -f1))"
+          else
+            echo "No previous deploy DB found — starting clean (first run after seed-enable)."
+          fi
+
       - name: Run full sync
         env:
           COLLECTOR_TIMEOUT: 300  # 5 min per collector max
