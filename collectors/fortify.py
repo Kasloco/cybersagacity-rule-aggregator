@@ -69,9 +69,11 @@ class FortifyCollector(BaseCollector):
     display_name = "Fortify SCA (OpenText)"
     source_type = "web"
     source_url = "https://vulncat.fortify.com/en"
-    # Web scrape of a paginated site: a relayout or bot-block can slash yield
-    # while still "succeeding". Floor = ~80% of the known-good set (1017).
-    min_rules_floor = 500
+    # Web scrape of a paginated, rate-limited site. True catalog ~1,691
+    # (polite census 2026-08-31); biggest throttled run observed = 836.
+    # Floor must sit ABOVE any plausible throttled yield or a rate-limited
+    # fragment gets mistaken for truth. 1,200 = ~71% of live truth.
+    min_rules_floor = 1200
     description = (
         "OpenText Fortify Taxonomy of Software Security Errors — a public "
         "catalog of security vulnerability categories organized into 8 "
@@ -177,11 +179,15 @@ class FortifyCollector(BaseCollector):
                     resp.raise_for_status()
                     break
                 except Exception as e:
+                    # vulncat rate-limits mid-crawl (verified 2026-08-31:
+                    # 403s after ~50 rapid requests, cooldown ~90s). Short
+                    # backoff is useless against it — wait out the window.
+                    cooldown = 60 if "403" in str(e) or "rate" in str(e).lower() else 2 * (attempt + 1)
                     logger.warning(
                         f"[fortify] Fetch {url} failed "
                         f"({attempt + 1}/3): {e}"
                     )
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(cooldown)
             if resp is None:
                 logger.warning(
                     f"[fortify] Kingdom '{kingdom}' page {page}: giving up "
@@ -218,8 +224,9 @@ class FortifyCollector(BaseCollector):
             if len(cells) < 20 or page >= 200:
                 break
             page += 1
-            # Be polite
-            time.sleep(0.5)
+            # Be polite — vulncat 403-throttles after ~50 rapid requests;
+            # 3.5s pacing completed a full 8-kingdom crawl with zero 403s.
+            time.sleep(3.5)
 
         if 0 < count < 20:
             logger.error(
