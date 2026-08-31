@@ -69,6 +69,9 @@ class FortifyCollector(BaseCollector):
     display_name = "Fortify SCA (OpenText)"
     source_type = "web"
     source_url = "https://vulncat.fortify.com/en"
+    # Web scrape of a paginated site: a relayout or bot-block can slash yield
+    # while still "succeeding". Floor = ~80% of the known-good set (1017).
+    min_rules_floor = 500
     description = (
         "OpenText Fortify Taxonomy of Software Security Errors — a public "
         "catalog of security vulnerability categories organized into 8 "

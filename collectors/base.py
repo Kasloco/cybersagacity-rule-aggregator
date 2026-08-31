@@ -31,6 +31,13 @@ class BaseCollector(ABC):
     source_url: str = ""
     description: str = ""
     logo_url: str = ""
+    # Minimum rules the source must return for this sync to be allowed to
+    # deactivate existing rules. 0 disables the guard. Protects against a
+    # collector "successfully" returning a tiny yield (site relayout, new
+    # bot-blocking, pagination break) from wiping a previously complete
+    # vendor rule set. Set per-collector, e.g. min_rules_floor = 500 for a
+    # scrape-based collector with ~1k rules.
+    min_rules_floor: int = 0
 
     def __init__(self):
         self.vendor = None
@@ -118,10 +125,37 @@ class BaseCollector(ABC):
             # rolls back atomically instead of leaving partial data.
             with transaction():
                 self.collect_rules()
-                removed = deactivate_missing_rules(
-                    self.vendor["id"], self.seen_rule_ids, self.sync_id
-                )
-                self.stats["removed"] = removed
+
+                current_active = 0
+                with get_db() as conn:
+                    current_active = conn.execute(
+                        "SELECT COUNT(*) FROM rules WHERE vendor_id=? AND is_active=1",
+                        (self.vendor["id"],),
+                    ).fetchone()[0]
+
+                # Weak-yield guard: if the source returns far fewer rules
+                # than the DB already holds, the scrape almost certainly broke
+                # (site relayout, bot blocking, pagination change) — deactivating
+                # would erase good data. Skip deactivation; keep added/updated.
+                # (Fortify lost 937 rules this way on 2026-08-30: vulncat
+                # returned 80 of 1017 and the rebuild kept the 80.)
+                # min_rules_floor=0 (default) disables the check.
+                if (
+                    self.min_rules_floor > 0
+                    and current_active >= self.min_rules_floor
+                    and len(self.seen_rule_ids) < self.min_rules_floor
+                ):
+                    logger.warning(
+                        f"[{self.name}] Weak-yield guard: collected "
+                        f"{len(self.seen_rule_ids)} rules vs {current_active} active "
+                        f"(floor {self.min_rules_floor}). Deactivation skipped; "
+                        f"existing rules preserved. Investigate the source."
+                    )
+                    self.stats["guarded"] = True
+                else:
+                    self.stats["removed"] = deactivate_missing_rules(
+                        self.vendor["id"], self.seen_rule_ids, self.sync_id
+                    )
 
             self.save_commit_sha()
             update_vendor_stats(self.vendor["id"])
@@ -130,10 +164,20 @@ class BaseCollector(ABC):
                 self.sync_id, "success",
                 self.stats["added"], self.stats["updated"], self.stats["removed"],
             )
+            if self.stats.get("guarded"):
+                with get_db() as conn:
+                    conn.execute(
+                        "UPDATE sync_history SET status='completed_guarded', "
+                        "error_message=? WHERE id=?",
+                        (f"weak yield: {len(self.seen_rule_ids)} collected < floor "
+                         f"{self.min_rules_floor}; deactivation skipped",
+                         self.sync_id),
+                    )
             logger.info(
                 f"[{self.name}] Sync complete: "
                 f"+{self.stats['added']} ~{self.stats['updated']} "
                 f"-{self.stats['removed']} ={self.stats['unchanged']}"
+                + (" (weak-yield guard: deactivation skipped)" if self.stats.get("guarded") else "")
             )
         except Exception as e:
             logger.error(f"[{self.name}] Sync failed: {e}", exc_info=True)
